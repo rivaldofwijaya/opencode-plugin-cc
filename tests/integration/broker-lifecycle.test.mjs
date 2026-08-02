@@ -232,6 +232,75 @@ test('dead holders are pruned before they can pin the broker', async () => {
   })
 })
 
+test('an explicit no-op release shuts down after pruning the last dead holder', async () => {
+  const env = await sandbox()
+  await registerSessions(env, 'cc-dead-explicit')
+  await withFakeOwnedBroker(env, async (broker) => {
+    const dead = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+    await terminate(dead.pid, { graceMs: 1000 })
+    await writeJson(refsPath(env), {
+      'cc-dead-explicit': {
+        'dead-holder': { pid: dead.pid, at: Date.now() },
+      },
+    })
+
+    const result = await releaseRef('cc-dead-explicit', env, 'missing-holder')
+    assert.equal(isAlive(broker.pid), false)
+    assert.deepEqual(result, { released: false, remaining: 0, shutdown: true })
+  })
+})
+
+test('a tokenless no-op release shuts down after pruning the last dead holder', async () => {
+  const env = await sandbox()
+  await registerSessions(env, 'cc-dead-tokenless')
+  await withFakeOwnedBroker(env, async (broker) => {
+    const dead = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+    await terminate(dead.pid, { graceMs: 1000 })
+    await writeJson(refsPath(env), {
+      'cc-dead-tokenless': {
+        'dead-holder': { pid: dead.pid, at: Date.now() },
+      },
+    })
+
+    const result = await releaseRef('cc-dead-tokenless', env)
+    assert.equal(isAlive(broker.pid), false)
+    assert.deepEqual(result, { released: false, remaining: 0, shutdown: true })
+  })
+})
+
+test('a no-op release leaves another live holder and the broker untouched', async () => {
+  const env = await sandbox()
+  await registerSessions(env, 'cc-dead-with-live', 'cc-live-with-dead')
+  await withFakeOwnedBroker(env, async (broker) => {
+    const dead = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+    const live = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+    await terminate(dead.pid, { graceMs: 1000 })
+    const liveAt = Date.now() + 1
+    try {
+      await writeJson(refsPath(env), {
+        'cc-dead-with-live': {
+          'dead-holder': { pid: dead.pid, at: Date.now() },
+        },
+        'cc-live-with-dead': {
+          'live-holder': { pid: live.pid, at: liveAt },
+        },
+      })
+
+      const result = await releaseRef('cc-dead-with-live', env, 'missing-holder')
+      assert.deepEqual(result, { released: false, remaining: 1, shutdown: false })
+      const refs = await readJson(refsPath(env), {})
+      assert.equal(refs['cc-dead-with-live'], undefined)
+      assert.deepEqual(refs['cc-live-with-dead'], {
+        'live-holder': { pid: live.pid, at: liveAt },
+      })
+      assert.equal(isAlive(live.pid), true)
+      assert.equal(isAlive(broker.pid), true)
+    } finally {
+      if (isAlive(live.pid)) await terminate(live.pid, { graceMs: 1000 })
+    }
+  })
+})
+
 test('old session timestamps migrate to independent holders without throwing', async () => {
   const env = await sandbox()
   await writeJson(refsPath(env), { legacy: 1 })

@@ -475,18 +475,12 @@ export async function releaseRef(ccSessionId, env = process.env, holderToken) {
     await writeRefs(next, env)
 
     const remaining = holderCount(next)
-    // A tokenless no-op must be visible to callers and must not shut down a
-    // broker that this call did not successfully release a holder from.
-    if (!released) return { remaining, shutdown: false, released: false }
-    if (remaining > 0) {
-      return tokenless
-        ? { remaining, shutdown: false, released: true }
-        : { remaining, shutdown: false }
-    }
-    await shutdownBrokerLocked(env)
+    const shutdown = remaining === 0
+    if (shutdown) await shutdownBrokerLocked(env)
+    if (!released) return { remaining, shutdown, released: false }
     return tokenless
-      ? { remaining: 0, shutdown: true, released: true }
-      : { remaining: 0, shutdown: true }
+      ? { remaining, shutdown, released: true }
+      : { remaining, shutdown }
   })
 }
 
