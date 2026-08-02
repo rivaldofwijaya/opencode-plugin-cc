@@ -6,7 +6,16 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { run, isAlive, terminate, spawnDetached } from '../../scripts/lib/process.mjs'
 import { startJob, runForeground, cancelJob } from '../../scripts/lib/job-control.mjs'
-import { createJob, readJob, readEvents, readResult, lastOpencodeSession, updateJob } from '../../scripts/lib/tracked-jobs.mjs'
+import {
+  createJob,
+  listJobs,
+  readJob,
+  readEvents,
+  readResult,
+  lastOpencodeSession,
+  updateJob,
+  writeResult,
+} from '../../scripts/lib/tracked-jobs.mjs'
 import { readEndpoint, refsPath } from '../../scripts/lib/broker-endpoint.mjs'
 import { jobDir, readJson } from '../../scripts/lib/state.mjs'
 
@@ -125,6 +134,47 @@ test('a background start returns immediately and settles later', async (t) => {
     assert.equal((await readJob(jobId, env)).state, 'running')
     const settled = await started.done
     assert.equal(settled.state, 'done')
+  } catch (error) {
+    if (bindFailure(error)) {
+      t.skip(`loopback binding is unavailable in this sandbox: ${error.message}`)
+      return
+    }
+    throw error
+  } finally {
+    await stopJob(jobId, env)
+  }
+})
+
+test('a fast worker with a terminal record does not make startJob throw', async (t) => {
+  const env = await sandbox({ FAKE_OPENCODE_EVENT_DELAY_MS: '0' })
+  let jobId
+  let launch
+  try {
+    launch = startJob({
+      ccSessionId: 'cc-fast-worker',
+      verb: 'review',
+      prompt: 'fast background review',
+      cwd: repoCwd,
+      env,
+    })
+
+    const deadline = Date.now() + 5000
+    let jobs = []
+    while (Date.now() < deadline && !jobs.length) {
+      jobs = await listJobs('cc-fast-worker', env)
+      if (!jobs.length) await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    assert.equal(jobs.length, 1, 'the launcher must create a durable job record')
+    jobId = jobs[0].id
+
+    // Simulate a worker that completes before the launcher's next handoff poll.
+    await writeResult(jobId, 'simulated fast-worker result', env)
+    await updateJob(jobId, { state: 'done', endedAt: Date.now(), error: null }, env)
+
+    const started = await launch
+    assert.equal(started.jobId, jobId)
+    assert.equal((await started.done).state, 'done')
+    assert.equal(await readResult(jobId, env), 'simulated fast-worker result')
   } catch (error) {
     if (bindFailure(error)) {
       t.skip(`loopback binding is unavailable in this sandbox: ${error.message}`)

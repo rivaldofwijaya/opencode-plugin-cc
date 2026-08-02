@@ -23,6 +23,7 @@ const STREAM_IDLE_TIMEOUT_MS = 2000
 const WORKER_HANDOFF_TIMEOUT_MS = 10_000
 const WORKER_FLAG = '--opencode-job-worker'
 const WORKER_MODULE = fileURLToPath(import.meta.url)
+const TERMINAL_JOB_STATES = new Set(['done', 'failed', 'cancelled'])
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -288,9 +289,16 @@ async function waitForWorkerRef(jobId, ccSessionId, workerToken, workerPid, env)
     if (holder?.pid === workerPid && owner?.pid === workerPid && owner.workerToken === workerToken) {
       return holder
     }
-    if (!isAlive(workerPid)) throw new Error(`opencode job worker exited before acquiring broker ref`)
+    if (!isAlive(workerPid)) {
+      const job = await readJob(jobId, env)
+      if (TERMINAL_JOB_STATES.has(job?.state)) return job
+      throw new Error(`opencode job worker died without recording a result`)
+    }
     await sleep(25)
   }
+  const finalJob = await readJob(jobId, env)
+  if (TERMINAL_JOB_STATES.has(finalJob?.state)) return finalJob
+  if (!isAlive(workerPid)) throw new Error(`opencode job worker died without recording a result`)
   throw new Error(`timed out waiting for opencode job worker to acquire broker ref`)
 }
 
