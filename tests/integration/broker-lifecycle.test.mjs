@@ -119,7 +119,7 @@ test('releaseRef prunes refs for sessions no longer registered', async () => {
   const env = await sandbox()
   await registerSessions(env, 'live', 'current')
   await writeJson(refsPath(env), { live: 1, current: 2, crashed: 3 })
-  assert.deepEqual(await releaseRef('current', env), { remaining: 1, shutdown: false })
+  assert.deepEqual(await releaseRef('current', env), { remaining: 1, shutdown: false, released: true })
   const refs = await readJson(refsPath(env), {})
   assert.deepEqual(Object.keys(refs), ['live'])
   assert.deepEqual(Object.values(refs.live), [{ pid: null, at: 1 }])
@@ -140,6 +140,71 @@ test('two holders in one session keep the broker alive until both release', asyn
     assert.deepEqual(second, { remaining: 0, shutdown: true })
     await new Promise((resolve) => setTimeout(resolve, 300))
     assert.equal(isAlive(broker.pid), false)
+  })
+})
+
+test('tokenless release does not steal a live holder owned by another pid', async () => {
+  const env = await sandbox()
+  await registerSessions(env, 'cc-two-live')
+  await withFakeOwnedBroker(env, async (broker) => {
+    const first = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+    const second = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+    try {
+      await writeJson(refsPath(env), {
+        'cc-two-live': {
+          'holder-first': { pid: first.pid, at: Date.now() },
+          'holder-second': { pid: second.pid, at: Date.now() + 1 },
+        },
+      })
+
+      const result = await releaseRef('cc-two-live', env)
+      assert.deepEqual(result, { remaining: 2, shutdown: false, released: false })
+      const refs = await readJson(refsPath(env), {})
+      assert.deepEqual(Object.keys(refs['cc-two-live']).sort(), ['holder-first', 'holder-second'])
+      assert.equal(isAlive(broker.pid), true)
+    } finally {
+      if (isAlive(first.pid)) await terminate(first.pid, { graceMs: 1000 })
+      if (isAlive(second.pid)) await terminate(second.pid, { graceMs: 1000 })
+    }
+  })
+})
+
+test('tokenless release can release the sole migrated legacy holder', async () => {
+  const env = await sandbox()
+  await registerSessions(env, 'cc-legacy-only')
+  await withFakeOwnedBroker(env, async (broker) => {
+    await writeJson(refsPath(env), { 'cc-legacy-only': Date.now() })
+
+    const result = await releaseRef('cc-legacy-only', env)
+    assert.deepEqual(result, { remaining: 0, shutdown: true, released: true })
+    assert.deepEqual(await readJson(refsPath(env), {}), {})
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    assert.equal(isAlive(broker.pid), false)
+  })
+})
+
+test('tokenless release prefers this process holder over another live pid', async () => {
+  const env = await sandbox()
+  await registerSessions(env, 'cc-owned')
+  await withFakeOwnedBroker(env, async (broker) => {
+    const foreign = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+    try {
+      await writeJson(refsPath(env), {
+        'cc-owned': {
+          'this-process': { pid: process.pid, at: Date.now() },
+          'foreign-process': { pid: foreign.pid, at: Date.now() + 1 },
+        },
+      })
+
+      const result = await releaseRef('cc-owned', env)
+      assert.deepEqual(result, { remaining: 1, shutdown: false, released: true })
+      const refs = await readJson(refsPath(env), {})
+      assert.deepEqual(Object.keys(refs['cc-owned']), ['foreign-process'])
+      assert.equal(isAlive(foreign.pid), true)
+      assert.equal(isAlive(broker.pid), true)
+    } finally {
+      if (isAlive(foreign.pid)) await terminate(foreign.pid, { graceMs: 1000 })
+    }
   })
 })
 

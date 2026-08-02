@@ -357,6 +357,9 @@ function holderCount(refs) {
 }
 
 function chooseLegacyReleaseToken(ccSessionId, env, holders) {
+  // The two-argument form is compatibility-only. It may release a holder
+  // only when local ownership, this process's PID, or the synthetic legacy
+  // pid:null marker proves that it is safe to do so.
   const key = localHolderKey(env, ccSessionId)
   const local = localHolderTokens.get(key) ?? []
   for (let index = local.length - 1; index >= 0; index -= 1) {
@@ -367,7 +370,11 @@ function chooseLegacyReleaseToken(ccSessionId, env, holders) {
   const owned = Object.entries(holders)
     .filter(([, holder]) => holder.pid === process.pid)
     .sort(([, a], [, b]) => a.at - b.at)
-  return owned[0]?.[0] ?? Object.keys(holders)[0]
+  if (owned[0]?.[0]) return owned[0][0]
+
+  return Object.entries(holders)
+    .filter(([, holder]) => holder.pid === null)
+    .sort(([, a], [, b]) => a.at - b.at)[0]?.[0]
 }
 
 function addKnownValue(set, value) {
@@ -448,14 +455,17 @@ async function shutdownBrokerLocked(env) {
 export async function releaseRef(ccSessionId, env = process.env, holderToken) {
   return await withLock(env, async () => {
     const next = pruneDeadHolders(normalizeRefs(await readJson(refsPath(env), {})))
+    const tokenless = !(typeof holderToken === 'string' && holderToken)
+    let released = false
     const holders = next[ccSessionId]
     if (holders) {
-      const token = typeof holderToken === 'string' && holderToken
-        ? holderToken
-        : chooseLegacyReleaseToken(ccSessionId, env, holders)
+      const token = tokenless
+        ? chooseLegacyReleaseToken(ccSessionId, env, holders)
+        : holderToken
       if (token && holders[token]) {
         delete holders[token]
         forgetLocalHolder(env, ccSessionId, token)
+        released = true
       }
       if (!Object.keys(holders).length) delete next[ccSessionId]
     }
@@ -465,9 +475,18 @@ export async function releaseRef(ccSessionId, env = process.env, holderToken) {
     await writeRefs(next, env)
 
     const remaining = holderCount(next)
-    if (remaining > 0) return { remaining, shutdown: false }
+    // A tokenless no-op must be visible to callers and must not shut down a
+    // broker that this call did not successfully release a holder from.
+    if (!released) return { remaining, shutdown: false, released: false }
+    if (remaining > 0) {
+      return tokenless
+        ? { remaining, shutdown: false, released: true }
+        : { remaining, shutdown: false }
+    }
     await shutdownBrokerLocked(env)
-    return { remaining: 0, shutdown: true }
+    return tokenless
+      ? { remaining: 0, shutdown: true, released: true }
+      : { remaining: 0, shutdown: true }
   })
 }
 
