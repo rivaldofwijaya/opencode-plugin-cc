@@ -73,6 +73,91 @@ test('parseSseChunk ignores comments, empty frames, and malformed JSON', () => {
   assert.deepEqual(result.events, [{ payload: { type: 'b' } }])
 })
 
+function sseFrame(payload) {
+  return `data: ${JSON.stringify({ payload })}\n\n`
+}
+
+function parseSseChunks(chunks) {
+  let buffer = ''
+  const events = []
+  for (const chunk of chunks) {
+    const parsed = parseSseChunk(buffer + chunk)
+    buffer = parsed.rest
+    events.push(...parsed.events)
+  }
+  assert.equal(buffer, '')
+  return events
+}
+
+function splitString(value, index) {
+  return [value.slice(0, index), value.slice(index)]
+}
+
+test('parseSseChunk returns identical events for arbitrary chunk boundaries', () => {
+  const first = sseFrame({ type: 'alpha', properties: { text: 'one' } })
+  const special = sseFrame({ type: 'text', properties: { text: 'contains\n\n} and more' } })
+  const third = sseFrame({ type: 'omega', properties: { count: 3 } })
+  const stream = first + special + third
+  const expected = parseSseChunks([stream])
+
+  const keyValueBoundary = stream.indexOf('"type":"alpha"') + '"type":'.length
+  const stringBoundary = first.length + special.indexOf('contains') + 3
+  const delimiterBoundary = stream.indexOf('\n\n') + 1
+  const partialFrameBoundary = Math.floor(special.length / 2)
+  assert.ok(keyValueBoundary > 0)
+  assert.ok(special.includes('contains\\n\\n} and more'))
+  assert.equal(stream[delimiterBoundary - 1], '\n')
+  assert.equal(stream[delimiterBoundary], '\n')
+
+  const chunkings = [
+    splitString(stream, keyValueBoundary),
+    splitString(stream, stringBoundary),
+    splitString(stream, delimiterBoundary),
+    Array.from(stream),
+    [first + special, third],
+    [first + special.slice(0, partialFrameBoundary), special.slice(partialFrameBoundary) + third],
+  ]
+
+  for (const chunks of chunkings) {
+    assert.deepEqual(parseSseChunks(chunks), expected)
+  }
+})
+
+test('events preserves UTF-8 characters split across reads', async () => {
+  const payload = {
+    type: 'session.next.text.delta',
+    properties: { text: 'before 🧪 after 中文' },
+  }
+  const encoded = new TextEncoder().encode(sseFrame(payload))
+  const marker = new TextEncoder().encode('🧪')
+  let markerOffset = -1
+  for (let index = 0; index <= encoded.length - marker.length; index += 1) {
+    if (marker.every((byte, offset) => encoded[index + offset] === byte)) {
+      markerOffset = index
+      break
+    }
+  }
+  assert.ok(markerOffset >= 0)
+
+  const chunks = [encoded.slice(0, markerOffset + 1), encoded.slice(markerOffset + 1)]
+  let readIndex = 0
+  const reader = {
+    async read() {
+      if (readIndex === chunks.length) return { done: true, value: undefined }
+      return { done: false, value: chunks[readIndex++] }
+    },
+    async cancel() {},
+  }
+  const client = new OpencodeClient('http://fixture.test', {
+    fetchImpl: async () => ({ ok: true, body: { getReader: () => reader } }),
+  })
+  const seen = []
+
+  await client.events({ onEvent: (event) => seen.push(event) })
+
+  assert.deepEqual(seen, [payload])
+})
+
 test('health is false for a dead endpoint', async () => {
   const client = new OpencodeClient('http://127.0.0.1:1')
   assert.equal(await client.health({ timeoutMs: 500 }), false)
