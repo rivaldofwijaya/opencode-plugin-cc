@@ -1,0 +1,9 @@
+{
+  "name": "opencode",
+  "description": "Delegate code review and coding tasks to the opencode CLI from Claude Code.",
+  "version": "0.1.0",
+  "commands": "./commands",
+  "agents": "./agents",
+  "skills": "./skills",
+  "hooks": "./hooks/hooks.json"
+}

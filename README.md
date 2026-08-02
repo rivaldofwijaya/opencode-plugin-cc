@@ -1,0 +1,1 @@
+The opencode Claude Code plugin delegates code review and coding tasks to the opencode CLI; install it with `/plugin marketplace add <repo>`, use opencode 1.18.0 or newer, and run `/opencode:setup` first.
