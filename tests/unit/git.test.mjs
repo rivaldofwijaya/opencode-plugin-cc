@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, realpath, writeFile, mkdir } from 'node:fs/promises'
+import { chmod, mkdtemp, realpath, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { run } from '../../scripts/lib/process.mjs'
@@ -12,6 +12,24 @@ const gitEnv = {
   GIT_AUTHOR_EMAIL: 't@t',
   GIT_COMMITTER_NAME: 'T',
   GIT_COMMITTER_EMAIL: 't@t',
+}
+
+async function envWithFailingGit(command) {
+  const bin = await mkdtemp(join(tmpdir(), 'ocgit-bin-'))
+  const wrapper = join(bin, 'git')
+  await writeFile(wrapper, `#!/bin/sh
+if [ "$1" = "${command}" ]; then
+  echo "forced ${command} failure" >&2
+  exit 42
+fi
+PATH="$OC_GIT_REAL_PATH" exec git "$@"
+`)
+  await chmod(wrapper, 0o755)
+  return {
+    ...gitEnv,
+    PATH: `${bin}:${gitEnv.PATH ?? ''}`,
+    OC_GIT_REAL_PATH: gitEnv.PATH ?? '',
+  }
 }
 
 async function repo({ commit = true } = {}) {
@@ -82,6 +100,15 @@ test('sizeChange counts staged changes', async () => {
   assert.equal(s.insertions, 1)
 })
 
+test('sizeChange reports a git status failure instead of an empty result', async () => {
+  const r = await repo()
+  const env = await envWithFailingGit('status')
+  await assert.rejects(
+    () => sizeChange({ cwd: r.dir, scope: 'working-tree', base: null, env }),
+    /git status --short --untracked-files=all -z exited with code 42: forced status failure/,
+  )
+})
+
 test('resolveScope picks branch when HEAD is ahead of base', async () => {
   const r = await repo()
   await r.git('branch', 'base-ref')
@@ -98,6 +125,14 @@ test('resolveScope picks working-tree when HEAD is not ahead', async () => {
   const r = await repo()
   const s = await resolveScope({ cwd: r.dir, scope: 'auto', base: 'HEAD' })
   assert.deepEqual(s, { scope: 'working-tree', base: null })
+})
+
+test('resolveScope reports a rev-list failure instead of falling back', async () => {
+  const r = await repo()
+  await assert.rejects(
+    () => resolveScope({ cwd: r.dir, scope: 'auto', base: 'missing-base' }),
+    /git rev-list --count missing-base\.\.HEAD exited with code \d+: .*unknown revision|invalid revision/,
+  )
 })
 
 test('an explicit scope is obeyed without inspecting the repo', async () => {
@@ -138,14 +173,31 @@ test('collectDiff includes tracked changes and untracked file contents', async (
   assert.equal(d.truncated, false)
 })
 
-test('collectDiff is byte-accurate and omits untracked files at the 64 KiB boundary', async () => {
+test('unborn repositories and untracked-only trees remain successful', async () => {
+  const r = await repo({ commit: false })
+  const path = 'new.txt'
+  await writeFile(join(r.dir, path), 'new\n')
+
+  const size = await sizeChange({ cwd: r.dir, scope: 'working-tree', base: null })
+  assert.equal(size.empty, false)
+  assert.deepEqual(size.untracked, [path])
+
+  const diff = await collectDiff({ cwd: r.dir, scope: 'working-tree', base: null })
+  assert.match(diff.text, /--- untracked: new\.txt/)
+  assert.match(diff.text, /new\n/)
+})
+
+test('collectDiff is byte-accurate around the 64 KiB boundary', async () => {
   const r = await repo()
   await writeFile(join(r.dir, 'a.txt'), `${'é'.repeat(200)}\n`)
   await writeFile(join(r.dir, 'exact.bin'), Buffer.alloc(64 * 1024, 0x78))
+  const under = 'u'.repeat(64 * 1024 - 1)
+  await writeFile(join(r.dir, 'under.bin'), under)
 
   const full = await collectDiff({ cwd: r.dir, scope: 'working-tree', base: null })
   assert.match(full.text, /--- untracked: exact\.bin/)
   assert.match(full.text, /\(65536 bytes, omitted\)/)
+  assert.ok(full.text.includes(`--- untracked: under.bin\n${under}`))
 
   const limited = await collectDiff({ cwd: r.dir, scope: 'working-tree', base: null, maxBytes: 120 })
   assert.equal(limited.truncated, true)
@@ -155,9 +207,25 @@ test('collectDiff is byte-accurate and omits untracked files at the 64 KiB bound
 test('collectDiff on a branch scope diffs against the merge base', async () => {
   const r = await repo()
   await r.git('branch', 'base-ref')
-  await writeFile(join(r.dir, 'c.txt'), 'c\n')
+  await r.git('checkout', '-b', 'feature')
+  await writeFile(join(r.dir, 'feature.txt'), 'feature\n')
   await r.git('add', '.')
-  await r.git('commit', '-m', 'third')
+  await r.git('commit', '-m', 'feature')
+  await r.git('checkout', 'base-ref')
+  await writeFile(join(r.dir, 'base.txt'), 'base\n')
+  await r.git('add', '.')
+  await r.git('commit', '-m', 'base')
+  await r.git('checkout', 'feature')
+
   const d = await collectDiff({ cwd: r.dir, scope: 'branch', base: 'base-ref' })
-  assert.match(d.text, /c\.txt/)
+  assert.match(d.text, /feature\.txt/)
+  assert.doesNotMatch(d.text, /base\.txt/)
+})
+
+test('collectDiff reports a branch diff failure instead of returning empty', async () => {
+  const r = await repo()
+  await assert.rejects(
+    () => collectDiff({ cwd: r.dir, scope: 'branch', base: 'missing-base' }),
+    /git diff missing-base\.\.\.HEAD exited with code \d+: .*unknown revision|invalid revision/,
+  )
 })

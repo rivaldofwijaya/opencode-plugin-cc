@@ -11,42 +11,88 @@ async function git(args, { cwd = process.cwd(), env = process.env, timeoutMs = D
   return run('git', args, { cwd, env, timeoutMs })
 }
 
+function gitCommand(args) {
+  return `git ${args.join(' ')}`
+}
+
+function gitFailure(args, result) {
+  const outcome = result.timedOut
+    ? 'timed out'
+    : `exited with code ${result.code ?? 'unknown'}`
+  const stderr = result.stderr.trim()
+  return new Error(`${gitCommand(args)} ${outcome}${stderr ? `: ${stderr}` : ''}`)
+}
+
+function requireGitSuccess(args, result) {
+  if (result.timedOut || result.code !== 0) throw gitFailure(args, result)
+  return result
+}
+
+function unparseableGitOutput(args, output) {
+  return new Error(`${gitCommand(args)} returned unparseable output: ${JSON.stringify(output)}`)
+}
+
 export async function repoRoot(cwd = process.cwd()) {
   const result = await git(['rev-parse', '--show-toplevel'], { cwd })
   if (result.code !== 0) throw new Error(`not a git repository: ${cwd}`)
   return result.stdout.trim()
 }
 
-async function refExists(cwd, ref) {
-  const result = await git(['rev-parse', '--verify', '--quiet', ref], { cwd })
+async function refExists(cwd, ref, env) {
+  const args = ['rev-parse', '--verify', '--quiet', ref]
+  const result = await git(args, { cwd, env })
+  if (result.timedOut) throw gitFailure(args, result)
   return result.code === 0
 }
 
-export async function defaultBase(cwd = process.cwd()) {
+export async function defaultBase(cwd = process.cwd(), env = process.env) {
+  const upstreamArgs = ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']
   const upstream = await git(
-    ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'],
-    { cwd },
+    upstreamArgs,
+    { cwd, env },
   )
+  if (upstream.timedOut) throw gitFailure(upstreamArgs, upstream)
   if (upstream.code === 0 && upstream.stdout.trim()) return upstream.stdout.trim()
 
   for (const ref of ['origin/main', 'origin/master', 'main', 'master']) {
-    if (await refExists(cwd, ref)) return ref
+    if (await refExists(cwd, ref, env)) return ref
   }
   return 'HEAD'
 }
 
-export async function resolveScope({ cwd = process.cwd(), scope = 'auto', base = null } = {}) {
+async function isUnbornRepository(cwd, env) {
+  const headArgs = ['rev-parse', '--verify', '--quiet', 'HEAD']
+  const head = await git(headArgs, { cwd, env })
+  if (head.timedOut) throw gitFailure(headArgs, head)
+  if (head.code === 0) return false
+  if (head.code !== 1 && head.code !== 128) throw gitFailure(headArgs, head)
+
+  const statusArgs = ['status', '--short', '--untracked-files=no']
+  const status = await git(statusArgs, { cwd, env })
+  requireGitSuccess(statusArgs, status)
+  return true
+}
+
+export async function resolveScope({ cwd = process.cwd(), scope = 'auto', base = null, env = process.env } = {}) {
   if (scope === 'working-tree') return { scope: 'working-tree', base: null }
   if (scope !== 'auto' && scope !== 'branch') {
     throw new Error(`scope must be auto, working-tree, or branch, got: ${scope}`)
   }
 
-  const resolvedBase = base ?? await defaultBase(cwd)
+  const resolvedBase = base ?? await defaultBase(cwd, env)
   if (scope === 'branch') return { scope: 'branch', base: resolvedBase }
 
-  const result = await git(['rev-list', '--count', `${resolvedBase}..HEAD`], { cwd })
-  const count = Number(result.stdout.trim())
-  if (result.code === 0 && Number.isFinite(count) && count > 0) {
+  if (resolvedBase === 'HEAD' && await isUnbornRepository(cwd, env)) {
+    return { scope: 'working-tree', base: null }
+  }
+
+  const args = ['rev-list', '--count', `${resolvedBase}..HEAD`]
+  const result = requireGitSuccess(args, await git(args, { cwd, env }))
+  const rawCount = result.stdout.trim()
+  if (!/^\d+$/.test(rawCount)) throw unparseableGitOutput(args, result.stdout)
+  const count = Number(rawCount)
+  if (!Number.isSafeInteger(count)) throw unparseableGitOutput(args, result.stdout)
+  if (count > 0) {
     return { scope: 'branch', base: resolvedBase }
   }
   return { scope: 'working-tree', base: null }
@@ -59,49 +105,83 @@ function parseShortstat(text) {
   return { files, insertions, deletions }
 }
 
-async function untrackedPaths(cwd) {
-  const result = await git(
-    ['status', '--short', '--untracked-files=all', '-z'],
-    { cwd },
-  )
-  if (result.code !== 0) return []
-
-  return result.stdout
-    .split('\0')
-    .filter((entry) => entry.startsWith('?? '))
-    .map((entry) => entry.slice(3))
-    .filter((path) => path.length > 0)
+function parseShortstatOutput(args, text) {
+  if (text.trim() !== '' && !/^\s*\d+ files? changed(?:, \d+ insertions?\(\+\))?(?:, \d+ deletions?\(-\))?\s*$/.test(text)) {
+    throw unparseableGitOutput(args, text)
+  }
+  return parseShortstat(text)
 }
 
-async function workingTreeStats(cwd) {
-  const result = await git(['diff', '--shortstat', 'HEAD'], { cwd })
-  if (result.code === 0) return parseShortstat(result.stdout)
+function parseStatusOutput(args, text) {
+  const entries = text.split('\0')
+  if (entries.at(-1) === '') entries.pop()
+
+  const paths = []
+  let renameSource = false
+  for (const entry of entries) {
+    if (renameSource) {
+      if (entry.length === 0) throw unparseableGitOutput(args, text)
+      renameSource = false
+      continue
+    }
+
+    const match = /^([ MADRCUT?!]{2}) ([\s\S]+)$/.exec(entry)
+    if (!match) throw unparseableGitOutput(args, text)
+
+    const status = match[1]
+    if (status === '??') paths.push(match[2])
+    if (status.includes('R') || status.includes('C')) renameSource = true
+  }
+  if (renameSource) throw unparseableGitOutput(args, text)
+  return paths
+}
+
+async function untrackedPaths(cwd, env) {
+  const args = ['status', '--short', '--untracked-files=all', '-z']
+  const result = requireGitSuccess(args, await git(args, { cwd, env }))
+
+  return parseStatusOutput(args, result.stdout)
+}
+
+async function workingTreeStats(cwd, env) {
+  const args = ['diff', '--shortstat', 'HEAD']
+  const result = await git(args, { cwd, env })
+  if (result.code === 0 && !result.timedOut) return parseShortstatOutput(args, result.stdout)
+  if (result.timedOut) throw gitFailure(args, result)
+  if (!(await isUnbornRepository(cwd, env))) throw gitFailure(args, result)
 
   // An unborn HEAD cannot be used as a diff endpoint. The two diffs are only
   // a fallback for that state; a repository with a commit uses the unique
   // tracked-file stats from `git diff HEAD` above.
-  const staged = await git(['diff', '--shortstat', '--cached'], { cwd })
-  const unstaged = await git(['diff', '--shortstat'], { cwd })
+  const stagedArgs = ['diff', '--shortstat', '--cached']
+  const unstagedArgs = ['diff', '--shortstat']
+  const staged = requireGitSuccess(stagedArgs, await git(stagedArgs, { cwd, env }))
+  const unstaged = requireGitSuccess(unstagedArgs, await git(unstagedArgs, { cwd, env }))
   return {
-    files: Math.max(parseShortstat(staged.stdout).files, parseShortstat(unstaged.stdout).files),
-    insertions: parseShortstat(staged.stdout).insertions + parseShortstat(unstaged.stdout).insertions,
-    deletions: parseShortstat(staged.stdout).deletions + parseShortstat(unstaged.stdout).deletions,
+    files: Math.max(parseShortstatOutput(stagedArgs, staged.stdout).files, parseShortstatOutput(unstagedArgs, unstaged.stdout).files),
+    insertions: parseShortstatOutput(stagedArgs, staged.stdout).insertions + parseShortstatOutput(unstagedArgs, unstaged.stdout).insertions,
+    deletions: parseShortstatOutput(stagedArgs, staged.stdout).deletions + parseShortstatOutput(unstagedArgs, unstaged.stdout).deletions,
   }
 }
 
-export async function sizeChange({ cwd = process.cwd(), scope = 'working-tree', base = null } = {}) {
+export async function sizeChange({ cwd = process.cwd(), scope = 'working-tree', base = null, env = process.env } = {}) {
   let stats
   if (scope === 'branch') {
-    const resolvedBase = base ?? await defaultBase(cwd)
-    const result = await git(['diff', '--shortstat', `${resolvedBase}...HEAD`], { cwd })
-    stats = parseShortstat(result.stdout)
+    const resolvedBase = base ?? await defaultBase(cwd, env)
+    if (resolvedBase === 'HEAD' && await isUnbornRepository(cwd, env)) {
+      stats = { files: 0, insertions: 0, deletions: 0 }
+    } else {
+      const args = ['diff', '--shortstat', `${resolvedBase}...HEAD`]
+      const result = requireGitSuccess(args, await git(args, { cwd, env }))
+      stats = parseShortstatOutput(args, result.stdout)
+    }
   } else if (scope === 'working-tree') {
-    stats = await workingTreeStats(cwd)
+    stats = await workingTreeStats(cwd, env)
   } else {
     throw new Error(`scope must be working-tree or branch, got: ${scope}`)
   }
 
-  const untracked = await untrackedPaths(cwd)
+  const untracked = await untrackedPaths(cwd, env)
   const empty = stats.files === 0
     && stats.insertions === 0
     && stats.deletions === 0
@@ -114,24 +194,31 @@ export async function sizeChange({ cwd = process.cwd(), scope = 'working-tree', 
   return { ...stats, untracked, empty, tiny }
 }
 
-async function trackedDiff(cwd, scope, base) {
+async function trackedDiff(cwd, scope, base, env) {
   if (scope === 'branch') {
-    const resolvedBase = base ?? await defaultBase(cwd)
-    const result = await git(['diff', `${resolvedBase}...HEAD`], { cwd, timeoutMs: DIFF_TIMEOUT_MS })
-    return result.code === 0 ? result.stdout : ''
+    const resolvedBase = base ?? await defaultBase(cwd, env)
+    if (resolvedBase === 'HEAD' && await isUnbornRepository(cwd, env)) return ''
+    const args = ['diff', `${resolvedBase}...HEAD`]
+    const result = requireGitSuccess(args, await git(args, { cwd, env, timeoutMs: DIFF_TIMEOUT_MS }))
+    return result.stdout
   }
   if (scope !== 'working-tree') {
     throw new Error(`scope must be working-tree or branch, got: ${scope}`)
   }
 
-  const result = await git(['diff', 'HEAD'], { cwd, timeoutMs: DIFF_TIMEOUT_MS })
-  if (result.code === 0) return result.stdout
+  const args = ['diff', 'HEAD']
+  const result = await git(args, { cwd, env, timeoutMs: DIFF_TIMEOUT_MS })
+  if (result.code === 0 && !result.timedOut) return result.stdout
+  if (result.timedOut) throw gitFailure(args, result)
+  if (!(await isUnbornRepository(cwd, env))) throw gitFailure(args, result)
 
   // An unborn HEAD has no revision to compare against. Preserve both staged
   // and unstaged tracked output in that exceptional state.
-  const staged = await git(['diff', '--cached'], { cwd, timeoutMs: DIFF_TIMEOUT_MS })
-  const unstaged = await git(['diff'], { cwd, timeoutMs: DIFF_TIMEOUT_MS })
-  return `${staged.code === 0 ? staged.stdout : ''}${unstaged.code === 0 ? unstaged.stdout : ''}`
+  const stagedArgs = ['diff', '--cached']
+  const unstagedArgs = ['diff']
+  const staged = requireGitSuccess(stagedArgs, await git(stagedArgs, { cwd, env, timeoutMs: DIFF_TIMEOUT_MS }))
+  const unstaged = requireGitSuccess(unstagedArgs, await git(unstagedArgs, { cwd, env, timeoutMs: DIFF_TIMEOUT_MS }))
+  return `${staged.stdout}${unstaged.stdout}`
 }
 
 async function untrackedSection(cwd, path) {
@@ -179,9 +266,10 @@ export async function collectDiff({
   scope = 'working-tree',
   base = null,
   maxBytes = 400_000,
+  env = process.env,
 } = {}) {
-  let text = await trackedDiff(cwd, scope, base)
-  for (const path of await untrackedPaths(cwd)) {
+  let text = await trackedDiff(cwd, scope, base, env)
+  for (const path of await untrackedPaths(cwd, env)) {
     text += `\n--- untracked: ${path}\n`
     text += await untrackedSection(cwd, path)
   }
