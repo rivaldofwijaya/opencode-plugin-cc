@@ -1,9 +1,10 @@
+import { randomBytes } from 'node:crypto'
 import { open, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ensureBroker } from './broker-lifecycle.mjs'
+import { addRef, ensureBroker, releaseRef } from './broker-lifecycle.mjs'
 import { atomicWrite } from './fs.mjs'
-import { spawnDetached, terminate, isAlive } from './process.mjs'
+import { spawnDetached, terminate, isAlive, run } from './process.mjs'
 import { jobDir } from './state.mjs'
 import {
   createJob,
@@ -113,7 +114,49 @@ async function failJob(jobId, error, env) {
   return next
 }
 
-function beginExecution({ broker, jobId, sessionID, promptOptions, env }) {
+async function holdBrokerRef(ccSessionId, env) {
+  await addRef(ccSessionId, env)
+  let releasePromise
+  return async () => {
+    releasePromise ??= releaseRef(ccSessionId, env)
+    await releasePromise
+  }
+}
+
+async function processCommand(pid) {
+  try {
+    const result = await run('ps', ['-p', String(pid), '-o', 'command='], { timeoutMs: 1000 })
+    if (result.code !== 0 || result.timedOut) return null
+    return result.stdout.trim()
+  } catch {
+    return null
+  }
+}
+
+async function ownsWorker(job, env) {
+  if (!job || !Number.isInteger(job.pid) || job.pid <= 0) return false
+  const owner = await readJson(join(jobDir(job.id, env), 'worker-owner.json'), null)
+  if (!owner
+    || owner.jobId !== job.id
+    || owner.pid !== job.pid
+    || typeof owner.workerToken !== 'string'
+    || !owner.workerToken) return false
+  if (!isAlive(owner.pid)) return false
+  const command = await processCommand(owner.pid)
+  return Boolean(command
+    && command.includes(WORKER_FLAG)
+    && command.includes(job.id)
+    && command.includes(owner.workerToken))
+}
+
+async function writeWorkerOwner(jobId, pid, workerToken, env) {
+  await atomicWrite(
+    join(jobDir(jobId, env), 'worker-owner.json'),
+    JSON.stringify({ jobId, pid, workerToken, startedAt: Date.now() }) + '\n',
+  )
+}
+
+function beginExecution({ broker, jobId, sessionID, promptOptions, env, releaseBrokerRef }) {
   let controller = null
   let terminal = null
   let persistence = Promise.resolve()
@@ -196,16 +239,22 @@ function beginExecution({ broker, jobId, sessionID, promptOptions, env }) {
       terminal = { state: 'failed', error: 'event stream ended before a terminal event' }
     }
 
-    await persistence
-    const latest = await readJob(jobId, env)
-    const state = latest?.state === 'cancelled' ? 'cancelled' : terminal.state
-    await writeResult(jobId, text, env)
-    return updateJob(jobId, {
-      state,
-      endedAt: Date.now(),
-      error: state === 'done' ? null : (latest?.state === 'cancelled' ? latest.error : terminal.error),
-      counters,
-    }, env)
+    try {
+      await persistence
+      const latest = await readJob(jobId, env)
+      const state = latest?.state === 'cancelled' ? 'cancelled' : terminal.state
+      await writeResult(jobId, text, env)
+      await releaseBrokerRef?.()
+      return updateJob(jobId, {
+        state,
+        endedAt: Date.now(),
+        error: state === 'done' ? null : (latest?.state === 'cancelled' ? latest.error : terminal.error),
+        counters,
+      }, env)
+    } catch (error) {
+      await releaseBrokerRef?.()
+      throw error
+    }
   })()
 
   const promptStarted = (async () => {
@@ -218,7 +267,7 @@ function beginExecution({ broker, jobId, sessionID, promptOptions, env }) {
     }
   })()
 
-  return { promptStarted, done: consume }
+  return { promptStarted, done: consume, cancel: () => settle({ state: 'cancelled', error: 'MessageAbortedError' }) }
 }
 
 async function writeWorkerRequest(jobId, request, env) {
@@ -228,18 +277,18 @@ async function writeWorkerRequest(jobId, request, env) {
   )
 }
 
-async function spawnWorker(jobId, cwd, env) {
+async function spawnWorker(jobId, cwd, env, workerToken, onError) {
   const directory = jobDir(jobId, env)
   const stdout = await open(join(directory, 'worker.stdout.log'), 'a')
   let stderr
   try {
     stderr = await open(join(directory, 'worker.stderr.log'), 'a')
-    const child = spawnDetached(process.execPath, [WORKER_MODULE, WORKER_FLAG, jobId], {
+    const child = spawnDetached(process.execPath, [WORKER_MODULE, WORKER_FLAG, jobId, workerToken], {
       cwd: await validWorkerCwd(cwd),
       env,
       stdio: ['ignore', stdout.fd, stderr.fd],
     })
-    child.once('error', (error) => { void failJob(jobId, error, env) })
+    child.once('error', (error) => { void onError(error) })
     return child
   } finally {
     await stderr?.close()
@@ -270,7 +319,6 @@ export async function startJob({
   background = true,
   env = process.env,
 }) {
-  const broker = await ensureBroker({ env })
   const job = await createJob({
     ccSessionId,
     verb,
@@ -279,7 +327,12 @@ export async function startJob({
     meta: { agent, model, variant },
   }, env)
 
+  let releaseBrokerRef
+  let workerOwnsRef = false
+  let executionOwnsRef = false
   try {
+    releaseBrokerRef = await holdBrokerRef(ccSessionId, env)
+    const broker = await ensureBroker({ env })
     const sessionID = resumeSessionID
       ?? (await broker.client.createSession({
         title: `claude-code ${verb}`,
@@ -290,13 +343,17 @@ export async function startJob({
 
     const promptOptions = { prompt, system, agent, model, variant, tools }
     if (background) {
-      await writeWorkerRequest(job.id, { sessionID, ...promptOptions }, env)
+      const workerToken = randomBytes(24).toString('hex')
+      await writeWorkerRequest(job.id, { sessionID, workerToken, ...promptOptions }, env)
       try {
-        await spawnWorker(job.id, cwd, env)
+        await spawnWorker(job.id, cwd, env, workerToken, async (error) => {
+          await failJob(job.id, error, env)
+          await releaseBrokerRef?.()
+        })
       } catch (error) {
-        await failJob(job.id, error, env)
         throw error
       }
+      workerOwnsRef = true
       return {
         jobId: job.id,
         sessionID,
@@ -304,10 +361,14 @@ export async function startJob({
       }
     }
 
-    const execution = beginExecution({ broker, jobId: job.id, sessionID, promptOptions, env })
+    const execution = beginExecution({
+      broker, jobId: job.id, sessionID, promptOptions, env, releaseBrokerRef,
+    })
+    executionOwnsRef = true
     await execution.promptStarted
     return { jobId: job.id, sessionID, done: execution.done }
   } catch (error) {
+    if (!workerOwnsRef && !executionOwnsRef) await releaseBrokerRef?.()
     await failJob(job.id, error, env)
     throw error
   }
@@ -332,7 +393,7 @@ export async function cancelJob(jobId, env = process.env) {
       // The durable cancellation record is authoritative if the broker is gone.
     }
   }
-  if (job.pid && job.pid !== process.pid && isAlive(job.pid)) {
+  if (job.pid && job.pid !== process.pid && await ownsWorker(job, env)) {
     await terminate(job.pid, { graceMs: 3000 })
   }
   return 'cancelled'
@@ -347,30 +408,57 @@ export async function cancelAll(ccSessionId, env = process.env) {
   return cancelled
 }
 
-async function runWorker(jobId, env) {
-  const current = await readJob(jobId, env)
-  if (!current || current.state !== 'running') return current
-  await updateJob(jobId, { pid: process.pid }, env)
-  const claimed = await readJob(jobId, env)
-  if (!claimed || claimed.state !== 'running') return claimed
+async function runWorker(jobId, env, workerToken) {
+  let releaseBrokerRef
+  let executionOwnsRef = false
+  let execution
+  let terminationRequested = false
+  const onSigterm = () => {
+    terminationRequested = true
+    execution?.cancel()
+  }
+  process.once('SIGTERM', onSigterm)
 
-  const request = await readJson(join(jobDir(jobId, env), 'worker.json'), null)
-  if (!request) throw new Error(`missing worker request for ${jobId}`)
-  const broker = await ensureBroker({ env })
-  const execution = beginExecution({
-    broker,
-    jobId,
-    sessionID: request.sessionID,
-    promptOptions: request,
-    env,
-  })
-  await execution.promptStarted
-  return execution.done
+  try {
+    const current = await readJob(jobId, env)
+    if (!current) return current
+    releaseBrokerRef = await holdBrokerRef(current.ccSessionId, env)
+    if (current.state !== 'running') return current
+
+    const request = await readJson(join(jobDir(jobId, env), 'worker.json'), null)
+    if (!request || request.workerToken !== workerToken) {
+      throw new Error(`missing or invalid worker request for ${jobId}`)
+    }
+    await writeWorkerOwner(jobId, process.pid, workerToken, env)
+    await updateJob(jobId, { pid: process.pid }, env)
+    const claimed = await readJob(jobId, env)
+    if (!claimed || claimed.state !== 'running') return claimed
+
+    const broker = await ensureBroker({ env })
+    execution = beginExecution({
+      broker,
+      jobId,
+      sessionID: request.sessionID,
+      promptOptions: request,
+      env,
+      releaseBrokerRef,
+    })
+    executionOwnsRef = true
+    if (terminationRequested) execution.cancel()
+    await execution.promptStarted
+    return execution.done
+  } catch (error) {
+    await failJob(jobId, error, env)
+    throw error
+  } finally {
+    process.removeListener('SIGTERM', onSigterm)
+    if (!executionOwnsRef) await releaseBrokerRef?.()
+  }
 }
 
 if (process.argv[2] === WORKER_FLAG && process.argv[3]) {
   try {
-    await runWorker(process.argv[3], process.env)
+    await runWorker(process.argv[3], process.env, process.argv[4])
   } catch (error) {
     await failJob(process.argv[3], error, process.env).catch(() => {})
     console.error(error.stack || error)
