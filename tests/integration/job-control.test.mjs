@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url'
 import { run, isAlive, terminate, spawnDetached } from '../../scripts/lib/process.mjs'
 import { startJob, runForeground, cancelJob } from '../../scripts/lib/job-control.mjs'
 import { createJob, readJob, readEvents, readResult, lastOpencodeSession, updateJob } from '../../scripts/lib/tracked-jobs.mjs'
-import { refsPath } from '../../scripts/lib/broker-endpoint.mjs'
-import { readJson } from '../../scripts/lib/state.mjs'
+import { readEndpoint, refsPath } from '../../scripts/lib/broker-endpoint.mjs'
+import { jobDir, readJson } from '../../scripts/lib/state.mjs'
 
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
 const repoCwd = fileURLToPath(new URL('../..', import.meta.url))
@@ -26,6 +26,16 @@ const bindFailure = (error) => /EACCES|EPERM|EADDRNOTAVAIL|loopback|listen/i.tes
 async function stopJob(jobId, env) {
   if (!jobId) return
   await cancelJob(jobId, env).catch(() => {})
+}
+
+async function waitForJobInTest(jobId, env) {
+  const deadline = Date.now() + 15000
+  while (Date.now() < deadline) {
+    const job = await readJob(jobId, env)
+    if (job && job.state !== 'running') return job
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  throw new Error(`timed out waiting for job ${jobId}`)
 }
 
 test('a foreground job runs to done and captures text, events, and counters', async (t) => {
@@ -189,6 +199,58 @@ test('an SSE disconnect mid-job reconnects and reaches a terminal state', async 
     throw error
   } finally {
     await stopJob(job?.id, env)
+  }
+})
+
+test('worker acquires its own ref before the launcher exits', async (t) => {
+  const env = await sandbox({ FAKE_OPENCODE_EVENT_DELAY_MS: '1000' })
+  let jobId
+  try {
+    const jobControlUrl = new URL('../../scripts/lib/job-control.mjs', import.meta.url).href
+    const launcher = `
+      import { startJob } from ${JSON.stringify(jobControlUrl)}
+      const started = await startJob({
+        ccSessionId: 'cc-handoff',
+        verb: 'review',
+        prompt: 'background handoff',
+        cwd: process.cwd(),
+        background: true,
+      })
+      process.stdout.write(JSON.stringify({ launcherPid: process.pid, ...started, done: undefined }))
+    `
+    const launched = await run(process.execPath, ['--input-type=module', '--eval', launcher], {
+      cwd: repoCwd,
+      env,
+      timeoutMs: 15000,
+    })
+    assert.equal(launched.code, 0, launched.stderr)
+    const launchRecord = JSON.parse(launched.stdout)
+    jobId = launchRecord.jobId
+
+    const request = await readJson(join(jobDir(jobId, env), 'worker.json'), null)
+    const owner = await readJson(join(jobDir(jobId, env), 'worker-owner.json'), null)
+    const refs = await readJson(refsPath(env), {})
+    const holders = refs['cc-handoff']
+    assert.ok(holders && typeof holders === 'object')
+    assert.deepEqual(holders[request.workerToken], {
+      pid: owner.pid,
+      at: holders[request.workerToken].at,
+    })
+    assert.notEqual(owner.pid, launchRecord.launcherPid)
+
+    const endpoint = await readEndpoint(env)
+    assert.ok(endpoint && isAlive(endpoint.pid), 'broker must survive launcher exit')
+
+    const settled = await waitForJobInTest(jobId, env)
+    assert.equal(settled.state, 'done')
+  } catch (error) {
+    if (bindFailure(error)) {
+      t.skip(`loopback binding is unavailable in this sandbox: ${error.message}`)
+      return
+    }
+    throw error
+  } finally {
+    await stopJob(jobId, env)
   }
 })
 

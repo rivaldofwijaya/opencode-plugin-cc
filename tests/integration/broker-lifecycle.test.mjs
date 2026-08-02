@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -18,7 +19,7 @@ import {
   refsPath,
 } from '../../scripts/lib/broker-endpoint.mjs'
 import { isAlive, spawnDetached, terminate } from '../../scripts/lib/process.mjs'
-import { readJson, writeJson, sessionsDir } from '../../scripts/lib/state.mjs'
+import { brokerDir, readJson, writeJson, sessionsDir } from '../../scripts/lib/state.mjs'
 
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
 
@@ -50,6 +51,25 @@ async function withBroker(t, env, callback) {
 async function registerSessions(env, ...ids) {
   await mkdir(sessionsDir(env), { recursive: true })
   for (const id of ids) await writeFile(join(sessionsDir(env), `${id}.json`), '{}')
+}
+
+async function withFakeOwnedBroker(env, callback) {
+  const child = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  const password = 'test-password'
+  const startedAt = Date.now()
+  await writeEndpoint({ port: 1, pid: child.pid, password, startedAt }, env)
+  await writeJson(join(brokerDir(env), 'owner.json'), {
+    pid: child.pid,
+    port: 1,
+    startedAt,
+    passwordHash: createHash('sha256').update(password).digest('hex'),
+  })
+  try {
+    return await callback({ pid: child.pid })
+  } finally {
+    await shutdownBroker(env)
+    if (isAlive(child.pid)) await terminate(child.pid, { graceMs: 1000 })
+  }
 }
 
 test('ensureBroker starts a server and writes a live private portfile', async (t) => {
@@ -88,9 +108,11 @@ test('concurrent ensureBroker calls spawn exactly one server', async (t) => {
 test('concurrent addRef calls preserve every distinct session', async () => {
   const env = await sandbox()
   const ids = Array.from({ length: 24 }, (_, index) => `cc-${index}`)
-  const counts = await Promise.all(ids.map((id) => addRef(id, env)))
+  const counts = await Promise.all(ids.map((id, index) => addRef(id, env, `holder-${index}`)))
   assert.equal(Math.max(...counts), ids.length)
-  assert.deepEqual(Object.keys(await readJson(refsPath(env), {})).sort(), ids.sort())
+  const refs = await readJson(refsPath(env), {})
+  assert.deepEqual(Object.keys(refs).sort(), ids.sort())
+  for (const id of ids) assert.equal(Object.keys(refs[id]).length, 1)
 })
 
 test('releaseRef prunes refs for sessions no longer registered', async () => {
@@ -98,7 +120,62 @@ test('releaseRef prunes refs for sessions no longer registered', async () => {
   await registerSessions(env, 'live', 'current')
   await writeJson(refsPath(env), { live: 1, current: 2, crashed: 3 })
   assert.deepEqual(await releaseRef('current', env), { remaining: 1, shutdown: false })
-  assert.deepEqual(await readJson(refsPath(env), {}), { live: 1 })
+  const refs = await readJson(refsPath(env), {})
+  assert.deepEqual(Object.keys(refs), ['live'])
+  assert.deepEqual(Object.values(refs.live), [{ pid: null, at: 1 }])
+})
+
+test('two holders in one session keep the broker alive until both release', async () => {
+  const env = await sandbox()
+  await registerSessions(env, 'cc-shared')
+  await withFakeOwnedBroker(env, async (broker) => {
+    await addRef('cc-shared', env, 'holder-first')
+    await addRef('cc-shared', env, 'holder-second')
+
+    const first = await releaseRef('cc-shared', env, 'holder-first')
+    assert.equal(isAlive(broker.pid), true)
+    assert.deepEqual(first, { remaining: 1, shutdown: false })
+
+    const second = await releaseRef('cc-shared', env, 'holder-second')
+    assert.deepEqual(second, { remaining: 0, shutdown: true })
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    assert.equal(isAlive(broker.pid), false)
+  })
+})
+
+test('dead holders are pruned before they can pin the broker', async () => {
+  const env = await sandbox()
+  await registerSessions(env, 'cc-dead', 'cc-live')
+  await withFakeOwnedBroker(env, async (broker) => {
+    const dead = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+    await terminate(dead.pid, { graceMs: 1000 })
+    assert.equal(isAlive(dead.pid), false)
+    await writeJson(refsPath(env), {
+      'cc-dead': { 'dead-holder': { pid: dead.pid, at: Date.now() } },
+    })
+
+    assert.equal(await addRef('cc-live', env, 'live-holder'), 1)
+    const refs = await readJson(refsPath(env), {})
+    assert.equal(refs['cc-dead'], undefined)
+
+    assert.deepEqual(
+      await releaseRef('cc-live', env, 'live-holder'),
+      { remaining: 0, shutdown: true },
+    )
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    assert.equal(isAlive(broker.pid), false)
+  })
+})
+
+test('old session timestamps migrate to independent holders without throwing', async () => {
+  const env = await sandbox()
+  await writeJson(refsPath(env), { legacy: 1 })
+
+  assert.equal(await addRef('legacy', env, 'new-holder'), 2)
+  const refs = await readJson(refsPath(env), {})
+  assert.equal(typeof refs.legacy, 'object')
+  assert.equal(Object.keys(refs.legacy).length, 2)
+  assert.deepEqual(refs.legacy['new-holder'], { pid: process.pid, at: refs.legacy['new-holder'].at })
 })
 
 test('reapOrphans does not remove a live broker lock', async () => {
@@ -127,11 +204,11 @@ test('the broker survives until the last ref is released', async (t) => {
   const env = await sandbox()
   await registerSessions(env, 'cc-1', 'cc-2')
   await withBroker(t, env, async (b) => {
-    await addRef('cc-1', env)
-    await addRef('cc-2', env)
-    assert.deepEqual(await releaseRef('cc-1', env), { remaining: 1, shutdown: false })
+    await addRef('cc-1', env, 'holder-1')
+    await addRef('cc-2', env, 'holder-2')
+    assert.deepEqual(await releaseRef('cc-1', env, 'holder-1'), { remaining: 1, shutdown: false })
     assert.equal(isAlive(b.pid), true)
-    const last = await releaseRef('cc-2', env)
+    const last = await releaseRef('cc-2', env, 'holder-2')
     assert.equal(last.shutdown, true)
     await new Promise((resolve) => setTimeout(resolve, 300))
     assert.equal(isAlive(b.pid), false)
