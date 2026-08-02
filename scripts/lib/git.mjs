@@ -32,17 +32,39 @@ function unparseableGitOutput(args, output) {
   return new Error(`${gitCommand(args)} returned unparseable output: ${JSON.stringify(output)}`)
 }
 
-export async function repoRoot(cwd = process.cwd()) {
-  const result = await git(['rev-parse', '--show-toplevel'], { cwd })
-  if (result.code !== 0) throw new Error(`not a git repository: ${cwd}`)
-  return result.stdout.trim()
+function hasNoUpstreamMessage(result) {
+  if (result.code !== 128) return false
+  const stderr = result.stderr.trim()
+  return /^fatal: no upstream configured for branch '.+'$/.test(stderr)
+    || stderr === 'fatal: HEAD does not point to a branch'
+    || /^fatal: no such branch: '.+'$/.test(stderr)
+}
+
+function noBaseCandidate() {
+  return new Error('no base candidate exists; pass --base')
+}
+
+function isUnbornDiffFailure(result) {
+  if (result.code !== 128) return false
+  const stderr = result.stderr.trim()
+  return stderr.includes("ambiguous argument 'HEAD':")
+    || stderr.includes("bad revision 'HEAD'")
+}
+
+export async function repoRoot(cwd = process.cwd(), env = process.env) {
+  const args = ['rev-parse', '--show-toplevel']
+  const result = requireGitSuccess(args, await git(args, { cwd, env }))
+  const root = result.stdout.trim()
+  if (root === '') throw unparseableGitOutput(args, result.stdout)
+  return root
 }
 
 async function refExists(cwd, ref, env) {
   const args = ['rev-parse', '--verify', '--quiet', ref]
   const result = await git(args, { cwd, env })
-  if (result.timedOut) throw gitFailure(args, result)
-  return result.code === 0
+  if (result.code === 0 && !result.timedOut) return true
+  if (!result.timedOut && result.code === 1) return false
+  throw gitFailure(args, result)
 }
 
 export async function defaultBase(cwd = process.cwd(), env = process.env) {
@@ -51,13 +73,18 @@ export async function defaultBase(cwd = process.cwd(), env = process.env) {
     upstreamArgs,
     { cwd, env },
   )
-  if (upstream.timedOut) throw gitFailure(upstreamArgs, upstream)
-  if (upstream.code === 0 && upstream.stdout.trim()) return upstream.stdout.trim()
+  if (upstream.code === 0 && !upstream.timedOut) {
+    const resolved = upstream.stdout.trim()
+    if (resolved !== '') return resolved
+    throw unparseableGitOutput(upstreamArgs, upstream.stdout)
+  }
+  if (!hasNoUpstreamMessage(upstream)) throw gitFailure(upstreamArgs, upstream)
 
   for (const ref of ['origin/main', 'origin/master', 'main', 'master']) {
     if (await refExists(cwd, ref, env)) return ref
   }
-  return 'HEAD'
+  // null is deliberate: callers must handle the absence of a safe diff base.
+  return null
 }
 
 async function isUnbornRepository(cwd, env) {
@@ -65,7 +92,7 @@ async function isUnbornRepository(cwd, env) {
   const head = await git(headArgs, { cwd, env })
   if (head.timedOut) throw gitFailure(headArgs, head)
   if (head.code === 0) return false
-  if (head.code !== 1 && head.code !== 128) throw gitFailure(headArgs, head)
+  if (head.code !== 1) throw gitFailure(headArgs, head)
 
   const statusArgs = ['status', '--short', '--untracked-files=no']
   const status = await git(statusArgs, { cwd, env })
@@ -80,6 +107,12 @@ export async function resolveScope({ cwd = process.cwd(), scope = 'auto', base =
   }
 
   const resolvedBase = base ?? await defaultBase(cwd, env)
+  if (resolvedBase === null) {
+    if (scope === 'auto' && await isUnbornRepository(cwd, env)) {
+      return { scope: 'working-tree', base: null }
+    }
+    throw noBaseCandidate()
+  }
   if (scope === 'branch') return { scope: 'branch', base: resolvedBase }
 
   if (resolvedBase === 'HEAD' && await isUnbornRepository(cwd, env)) {
@@ -148,6 +181,7 @@ async function workingTreeStats(cwd, env) {
   const result = await git(args, { cwd, env })
   if (result.code === 0 && !result.timedOut) return parseShortstatOutput(args, result.stdout)
   if (result.timedOut) throw gitFailure(args, result)
+  if (!isUnbornDiffFailure(result)) throw gitFailure(args, result)
   if (!(await isUnbornRepository(cwd, env))) throw gitFailure(args, result)
 
   // An unborn HEAD cannot be used as a diff endpoint. The two diffs are only
@@ -168,6 +202,7 @@ export async function sizeChange({ cwd = process.cwd(), scope = 'working-tree', 
   let stats
   if (scope === 'branch') {
     const resolvedBase = base ?? await defaultBase(cwd, env)
+    if (resolvedBase === null) throw noBaseCandidate()
     if (resolvedBase === 'HEAD' && await isUnbornRepository(cwd, env)) {
       stats = { files: 0, insertions: 0, deletions: 0 }
     } else {
@@ -197,6 +232,7 @@ export async function sizeChange({ cwd = process.cwd(), scope = 'working-tree', 
 async function trackedDiff(cwd, scope, base, env) {
   if (scope === 'branch') {
     const resolvedBase = base ?? await defaultBase(cwd, env)
+    if (resolvedBase === null) throw noBaseCandidate()
     if (resolvedBase === 'HEAD' && await isUnbornRepository(cwd, env)) return ''
     const args = ['diff', `${resolvedBase}...HEAD`]
     const result = requireGitSuccess(args, await git(args, { cwd, env, timeoutMs: DIFF_TIMEOUT_MS }))
@@ -210,6 +246,7 @@ async function trackedDiff(cwd, scope, base, env) {
   const result = await git(args, { cwd, env, timeoutMs: DIFF_TIMEOUT_MS })
   if (result.code === 0 && !result.timedOut) return result.stdout
   if (result.timedOut) throw gitFailure(args, result)
+  if (!isUnbornDiffFailure(result)) throw gitFailure(args, result)
   if (!(await isUnbornRepository(cwd, env))) throw gitFailure(args, result)
 
   // An unborn HEAD has no revision to compare against. Preserve both staged
@@ -249,15 +286,21 @@ function truncateUtf8(text, maxBytes) {
   const limit = Number.isFinite(maxBytes) ? Math.max(0, Math.floor(maxBytes)) : 400_000
   if (Buffer.byteLength(text) <= limit) return { text, truncated: false }
 
+  const bytes = Buffer.from(text, 'utf8')
+  const utf8Prefix = (max) => {
+    let prefix = bytes.subarray(0, max).toString('utf8')
+    while (Buffer.byteLength(prefix) > max) prefix = prefix.slice(0, -1)
+    return prefix
+  }
   const markerBytes = Buffer.byteLength(TRUNCATION_MARKER)
   if (limit <= markerBytes) {
     return {
-      text: Buffer.from(text, 'utf8').subarray(0, limit).toString('utf8'),
+      text: utf8Prefix(limit),
       truncated: true,
     }
   }
 
-  const prefix = Buffer.from(text, 'utf8').subarray(0, limit - markerBytes).toString('utf8')
+  const prefix = utf8Prefix(limit - markerBytes)
   return { text: prefix + TRUNCATION_MARKER, truncated: true }
 }
 

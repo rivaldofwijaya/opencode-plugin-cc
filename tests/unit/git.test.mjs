@@ -32,10 +32,28 @@ PATH="$OC_GIT_REAL_PATH" exec git "$@"
   }
 }
 
-async function repo({ commit = true } = {}) {
+async function envWithFailingRevParse(argument) {
+  const bin = await mkdtemp(join(tmpdir(), 'ocgit-bin-'))
+  const wrapper = join(bin, 'git')
+  await writeFile(wrapper, `#!/bin/sh
+if [ "$1" = "rev-parse" ] && [ "$4" = "${argument}" ]; then
+  echo "forced rev-parse ${argument} failure" >&2
+  exit 42
+fi
+PATH="$OC_GIT_REAL_PATH" exec git "$@"
+`)
+  await chmod(wrapper, 0o755)
+  return {
+    ...gitEnv,
+    PATH: `${bin}:${gitEnv.PATH ?? ''}`,
+    OC_GIT_REAL_PATH: gitEnv.PATH ?? '',
+  }
+}
+
+async function repo({ commit = true, branch = 'main' } = {}) {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'ocgit-')))
   const git = (...args) => run('git', args, { cwd: dir, env: gitEnv })
-  await git('init', '-b', 'main')
+  await git('init', '-b', branch)
   if (commit) {
     await writeFile(join(dir, 'a.txt'), 'one\n')
     await git('add', '.')
@@ -52,7 +70,19 @@ test('repoRoot resolves the repository and rejects outside a repo', async () => 
   assert.equal(await repoRoot(nested), r.dir)
 
   const bare = await mkdtemp(join(tmpdir(), 'ocnogit-'))
-  await assert.rejects(() => repoRoot(bare), /not a git repository/)
+  await assert.rejects(
+    () => repoRoot(bare),
+    /git rev-parse --show-toplevel exited with code \d+: .*not a git repository/,
+  )
+})
+
+test('repoRoot reports a git failure with command and stderr', async () => {
+  const r = await repo()
+  const env = await envWithFailingGit('rev-parse')
+  await assert.rejects(
+    () => repoRoot(r.dir, env),
+    /git rev-parse --show-toplevel exited with code 42: forced rev-parse failure/,
+  )
 })
 
 test('sizeChange reports a clean tree as empty but not tiny', async () => {
@@ -135,6 +165,24 @@ test('resolveScope reports a rev-list failure instead of falling back', async ()
   )
 })
 
+test('defaultBase reports an upstream lookup failure instead of falling back', async () => {
+  const r = await repo()
+  const env = await envWithFailingRevParse('@{u}')
+  await assert.rejects(
+    () => defaultBase(r.dir, env),
+    /git rev-parse --abbrev-ref --symbolic-full-name @\{u\} exited with code 42: forced rev-parse @\{u\} failure/,
+  )
+})
+
+test('defaultBase reports a candidate lookup failure instead of treating it as missing', async () => {
+  const r = await repo({ branch: 'topic' })
+  const env = await envWithFailingRevParse('origin/main')
+  await assert.rejects(
+    () => defaultBase(r.dir, env),
+    /git rev-parse --verify --quiet origin\/main exited with code 42: forced rev-parse origin\/main failure/,
+  )
+})
+
 test('an explicit scope is obeyed without inspecting the repo', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ocscope-'))
   assert.deepEqual(
@@ -154,11 +202,32 @@ test('defaultBase handles local main, detached HEAD, and an empty repository', a
   assert.equal(await defaultBase(r.dir), 'main')
 
   const empty = await repo({ commit: false })
-  assert.equal(await defaultBase(empty.dir), 'HEAD')
+  assert.equal(await defaultBase(empty.dir), null)
   assert.deepEqual(await resolveScope({ cwd: empty.dir, scope: 'auto' }), {
     scope: 'working-tree',
     base: null,
   })
+  await assert.rejects(
+    () => resolveScope({ cwd: empty.dir, scope: 'branch' }),
+    /no base candidate exists; pass --base/,
+  )
+})
+
+test('defaultBase requires an explicit base for a committed branch without candidates', async () => {
+  const r = await repo({ branch: 'topic' })
+  assert.equal(await defaultBase(r.dir), null)
+  await assert.rejects(
+    () => resolveScope({ cwd: r.dir, scope: 'auto' }),
+    /no base candidate exists; pass --base/,
+  )
+  await assert.rejects(
+    () => sizeChange({ cwd: r.dir, scope: 'branch' }),
+    /no base candidate exists; pass --base/,
+  )
+  await assert.rejects(
+    () => collectDiff({ cwd: r.dir, scope: 'branch' }),
+    /no base candidate exists; pass --base/,
+  )
 })
 
 test('collectDiff includes tracked changes and untracked file contents', async () => {
@@ -190,18 +259,24 @@ test('unborn repositories and untracked-only trees remain successful', async () 
 test('collectDiff is byte-accurate around the 64 KiB boundary', async () => {
   const r = await repo()
   await writeFile(join(r.dir, 'a.txt'), `${'é'.repeat(200)}\n`)
-  await writeFile(join(r.dir, 'exact.bin'), Buffer.alloc(64 * 1024, 0x78))
-  const under = 'u'.repeat(64 * 1024 - 1)
+  const under = `${'é'.repeat(32767)}x`
+  const exact = 'é'.repeat(32768)
+  assert.equal(Buffer.byteLength(under), 65535)
+  assert.equal(under.length, 32768)
+  assert.equal(Buffer.byteLength(exact), 65536)
+  assert.equal(exact.length, 32768)
+  await writeFile(join(r.dir, 'exact.bin'), exact)
   await writeFile(join(r.dir, 'under.bin'), under)
 
   const full = await collectDiff({ cwd: r.dir, scope: 'working-tree', base: null })
   assert.match(full.text, /--- untracked: exact\.bin/)
   assert.match(full.text, /\(65536 bytes, omitted\)/)
+  assert.ok(!full.text.includes(`--- untracked: exact.bin\n${exact}`))
   assert.ok(full.text.includes(`--- untracked: under.bin\n${under}`))
 
-  const limited = await collectDiff({ cwd: r.dir, scope: 'working-tree', base: null, maxBytes: 120 })
+  const limited = await collectDiff({ cwd: r.dir, scope: 'working-tree', base: null, maxBytes: 65535 })
   assert.equal(limited.truncated, true)
-  assert.ok(Buffer.byteLength(limited.text) <= 120)
+  assert.ok(Buffer.byteLength(limited.text) <= 65535)
 })
 
 test('collectDiff on a branch scope diffs against the merge base', async () => {
