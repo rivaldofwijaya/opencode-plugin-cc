@@ -1,16 +1,18 @@
+import { execFile } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { extractJson, validateReview, parseReviewOutput } from '../../scripts/lib/review-schema.mjs'
+import { extractJson, loadSchema, validateReview, parseReviewOutput } from '../../scripts/lib/review-schema.mjs'
 import { readJsonc } from '../../scripts/lib/fs.mjs'
 
+const execFileAsync = promisify(execFile)
 const schemaPath = fileURLToPath(new URL('../../schemas/review-output.schema.json', import.meta.url))
 const reviewSchemaModuleUrl = new URL('../../scripts/lib/review-schema.mjs', import.meta.url)
-const importReviewSchema = path => import(`${reviewSchemaModuleUrl.href}?schema=${encodeURIComponent(path)}`)
 
 test('extractJson finds a bare object', () => {
   assert.equal(extractJson('{"a":1}'), '{"a":1}')
@@ -66,19 +68,19 @@ test('validateReview derives keys and enums from the loaded schema', async () =>
     assert.equal(original.ok, false)
     assert.match(original.error, /severities/)
 
-    const changed = await importReviewSchema(path)
-    assert.deepEqual(changed.SEVERITIES, ['blocker', 'high', 'medium', 'low', 'info'])
-    assert.equal(changed.validateReview(changedReport).ok, true)
+    const changed = await loadSchema(path)
+    assert.deepEqual(changed.severityValues, ['blocker', 'high', 'medium', 'low', 'info'])
+    assert.equal(validateReview(changedReport, changed).ok, true)
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
 })
 
-test('a missing review schema fails during module load', async () => {
+test('loadSchema rejects a missing review schema', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'oc-review-schema-'))
   try {
     await assert.rejects(
-      importReviewSchema(join(directory, 'missing.json')),
+      loadSchema(join(directory, 'missing.json')),
       /could not load review schema.*file not found/,
     )
   } finally {
@@ -86,15 +88,41 @@ test('a missing review schema fails during module load', async () => {
   }
 })
 
-test('a malformed review schema fails during module load', async () => {
+test('loadSchema rejects a malformed review schema', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'oc-review-schema-'))
   const path = join(directory, 'malformed.json')
   try {
     await writeFile(path, '{"properties":')
     await assert.rejects(
-      importReviewSchema(path),
+      loadSchema(path),
       /could not load review schema.*JSON|malformed review schema/,
     )
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('the environment cannot repoint the production review schema', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'oc-review-schema-'))
+  const path = join(directory, 'permissive.json')
+  try {
+    const schema = await readJsonc(schemaPath)
+    schema.properties.findings.items.properties.severity.enum = ['permissive']
+    await writeFile(path, JSON.stringify(schema))
+
+    const report = {
+      findings: [{ file: 'a.js', severity: 'permissive', confidence: 'high', body: 'x' }],
+    }
+    const script = `
+      import { validateReview } from ${JSON.stringify(reviewSchemaModuleUrl.href)}
+      process.stdout.write(JSON.stringify(validateReview(${JSON.stringify(report)})))
+    `
+    const { stdout } = await execFileAsync(process.execPath, ['--input-type=module', '-e', script], {
+      env: { ...process.env, OPENCODE_REVIEW_SCHEMA_PATH: path },
+    })
+    const result = JSON.parse(stdout)
+    assert.equal(result.ok, false)
+    assert.match(result.error, /severity/)
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

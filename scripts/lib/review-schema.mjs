@@ -1,11 +1,11 @@
+// Production always loads the packaged schema below. The exported loadSchema(path)
+// and optional validateReview contract argument are explicit in-process test seams;
+// URL query parameters and environment variables cannot replace the production contract.
 import { fileURLToPath } from 'node:url'
 
 import { readJsonc } from './fs.mjs'
 
 const defaultSchemaPath = fileURLToPath(new URL('../../schemas/review-output.schema.json', import.meta.url))
-const schemaPath = new URL(import.meta.url).searchParams.get('schema')
-  ?? process.env.OPENCODE_REVIEW_SCHEMA_PATH
-  ?? defaultSchemaPath
 
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -76,7 +76,7 @@ function schemaContract(schema) {
   }
 }
 
-async function loadSchema(path) {
+export async function loadSchema(path = defaultSchemaPath) {
   let schema
   try {
     schema = await readJsonc(path)
@@ -92,7 +92,7 @@ async function loadSchema(path) {
   }
 }
 
-const CONTRACT = await loadSchema(schemaPath)
+const CONTRACT = await loadSchema()
 
 export const SEVERITIES = CONTRACT.severityValues
 export const CONFIDENCES = CONTRACT.confidenceValues
@@ -170,14 +170,14 @@ function schemaValueError(value, definition, path) {
   return null
 }
 
-export function validateReview(obj) {
+export function validateReview(obj, contract = CONTRACT) {
   if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) {
     return { ok: false, error: 'review output must be a JSON object' }
   }
 
-  const unknownReviewKey = unknownProperty(obj, CONTRACT.reviewKeys, 'review output')
+  const unknownReviewKey = unknownProperty(obj, contract.reviewKeys, 'review output')
   if (unknownReviewKey) return { ok: false, error: unknownReviewKey }
-  for (const key of CONTRACT.reviewRequired) {
+  for (const key of contract.reviewRequired) {
     if (!Object.hasOwn(obj, key)) {
       return {
         ok: false,
@@ -187,7 +187,7 @@ export function validateReview(obj) {
       }
     }
   }
-  for (const [key, definition] of Object.entries(CONTRACT.reviewProperties)) {
+  for (const [key, definition] of Object.entries(contract.reviewProperties)) {
     if (!Object.hasOwn(obj, key) || key === 'findings') continue
     const error = schemaValueError(obj[key], definition, `"${key}"`)
     if (error) return { ok: false, error }
@@ -203,14 +203,14 @@ export function validateReview(obj) {
       return { ok: false, error: `${at} must be an object` }
     }
 
-    const unknownFindingKey = unknownProperty(finding, CONTRACT.findingKeys, at)
+    const unknownFindingKey = unknownProperty(finding, contract.findingKeys, at)
     if (unknownFindingKey) return { ok: false, error: unknownFindingKey }
-    for (const key of CONTRACT.findingRequired) {
+    for (const key of contract.findingRequired) {
       if (!Object.hasOwn(finding, key)) {
         return { ok: false, error: `${at}.${key} is required` }
       }
     }
-    for (const [key, definition] of Object.entries(CONTRACT.findingProperties)) {
+    for (const [key, definition] of Object.entries(contract.findingProperties)) {
       if (!Object.hasOwn(finding, key)) continue
       const error = schemaValueError(finding[key], definition, `${at}.${key}`)
       if (error) return { ok: false, error }
