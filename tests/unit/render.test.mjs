@@ -10,17 +10,30 @@ test('formatElapsed formats seconds, minutes, and hours', () => {
 
 test('renderReview orders the full severity set by schema order', () => {
   const inputOrder = ['info', 'low', 'medium', 'high', 'critical']
+  const details = {
+    critical: { file: 'a.js', line: 9, title: 'Critical title', body: 'critical body' },
+    high: { file: 'b.js', line: 2, title: 'High title', body: 'high body' },
+  }
   const out = renderReview({
     ok: true,
     findings: inputOrder.map(severity => ({
-      file: `${severity}.js`,
+      ...details[severity],
+      file: details[severity]?.file ?? `${severity}.js`,
+      line: details[severity]?.line ?? 1,
+      title: details[severity]?.title ?? `${severity} title`,
       severity,
       confidence: 'high',
-      body: severity,
+      body: details[severity]?.body ?? `${severity} body`,
     })),
   }, { scope: 'working-tree', base: null, truncated: false, jobId: 'job_1' })
   const actual = [...out.matchAll(/^\[([A-Z]+)\]/gm)].map(match => match[1])
   assert.deepEqual(actual, ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'])
+  assert.match(out, /a\.js:9/)
+  assert.match(out, /b\.js:2/)
+  assert.match(out, /Critical title/)
+  assert.match(out, /High title/)
+  assert.match(out, /critical body/)
+  assert.match(out, /high body/)
 })
 
 test('renderReview states plainly when there are no findings', () => {
