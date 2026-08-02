@@ -1,6 +1,16 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
+
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { extractJson, validateReview, parseReviewOutput } from '../../scripts/lib/review-schema.mjs'
+import { readJsonc } from '../../scripts/lib/fs.mjs'
+
+const schemaPath = fileURLToPath(new URL('../../schemas/review-output.schema.json', import.meta.url))
+const reviewSchemaModuleUrl = new URL('../../scripts/lib/review-schema.mjs', import.meta.url)
+const importReviewSchema = path => import(`${reviewSchemaModuleUrl.href}?schema=${encodeURIComponent(path)}`)
 
 test('extractJson finds a bare object', () => {
   assert.equal(extractJson('{"a":1}'), '{"a":1}')
@@ -30,6 +40,64 @@ test('validateReview accepts a well-formed report', () => {
 
 test('validateReview accepts an empty findings list', () => {
   assert.equal(validateReview({ findings: [] }).ok, true)
+})
+
+test('validateReview derives keys and enums from the loaded schema', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'oc-review-schema-'))
+  const path = join(directory, 'review.jsonc')
+  try {
+    const schema = await readJsonc(schemaPath)
+    schema.properties.severities = { type: 'string' }
+    schema.properties.findings.items.properties.file_path = { type: 'string' }
+    schema.properties.findings.items.properties.severity.enum = ['blocker', 'high', 'medium', 'low', 'info']
+    await writeFile(path, JSON.stringify(schema))
+
+    const changedReport = {
+      severities: 'one',
+      findings: [{
+        file: 'a.js',
+        file_path: 'src/a.js',
+        severity: 'blocker',
+        confidence: 'high',
+        body: 'boom',
+      }],
+    }
+    const original = validateReview(changedReport)
+    assert.equal(original.ok, false)
+    assert.match(original.error, /severities/)
+
+    const changed = await importReviewSchema(path)
+    assert.deepEqual(changed.SEVERITIES, ['blocker', 'high', 'medium', 'low', 'info'])
+    assert.equal(changed.validateReview(changedReport).ok, true)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('a missing review schema fails during module load', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'oc-review-schema-'))
+  try {
+    await assert.rejects(
+      importReviewSchema(join(directory, 'missing.json')),
+      /could not load review schema.*file not found/,
+    )
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('a malformed review schema fails during module load', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'oc-review-schema-'))
+  const path = join(directory, 'malformed.json')
+  try {
+    await writeFile(path, '{"properties":')
+    await assert.rejects(
+      importReviewSchema(path),
+      /could not load review schema.*JSON|malformed review schema/,
+    )
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })
 
 test('validateReview accepts a null line and an empty optional title', () => {
@@ -67,17 +135,19 @@ test('validateReview rejects a non-array findings value', () => {
   assert.match(r.error, /findings.*array/)
 })
 
-test('validateReview rejects an unknown top-level property by name', () => {
-  const r = validateReview({ findings: [], hallucinated: true })
-  assert.equal(r.ok, false)
-  assert.match(r.error, /hallucinated/)
-})
+for (const unknownKey of ['hallucinated', 'severities', 'file_path', 'finding']) {
+  test(`validateReview rejects unknown top-level property ${unknownKey}`, () => {
+    const r = validateReview({ findings: [], [unknownKey]: true })
+    assert.equal(r.ok, false)
+    assert.match(r.error, new RegExp(unknownKey))
+  })
 
-test('validateReview rejects an unknown finding property by name', () => {
-  const r = validateReview({ findings: [{ file: 'a.js', severity: 'high', confidence: 'high', body: 'x', hallucinated: true }] })
-  assert.equal(r.ok, false)
-  assert.match(r.error, /hallucinated/)
-})
+  test(`validateReview rejects unknown finding property ${unknownKey}`, () => {
+    const r = validateReview({ findings: [{ file: 'a.js', severity: 'high', confidence: 'high', body: 'x', [unknownKey]: true }] })
+    assert.equal(r.ok, false)
+    assert.match(r.error, new RegExp(unknownKey))
+  })
+}
 
 test('validateReview rejects an invalid line', () => {
   const r = validateReview({ findings: [{ file: 'a.js', line: 0, severity: 'high', confidence: 'high', body: 'x' }] })

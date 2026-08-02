@@ -1,8 +1,101 @@
-export const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info']
-export const CONFIDENCES = ['high', 'medium', 'low']
+import { fileURLToPath } from 'node:url'
 
-const REVIEW_KEYS = new Set(['summary', 'findings'])
-const FINDING_KEYS = new Set(['file', 'line', 'severity', 'confidence', 'body', 'title'])
+import { readJsonc } from './fs.mjs'
+
+const defaultSchemaPath = fileURLToPath(new URL('../../schemas/review-output.schema.json', import.meta.url))
+const schemaPath = new URL(import.meta.url).searchParams.get('schema')
+  ?? process.env.OPENCODE_REVIEW_SCHEMA_PATH
+  ?? defaultSchemaPath
+
+function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function requireObject(value, label) {
+  if (!isObject(value)) throw new Error(`${label} must be an object`)
+  return value
+}
+
+function requireStringArray(value, label) {
+  if (!Array.isArray(value) || value.length === 0
+    || value.some(item => typeof item !== 'string' || item === '')) {
+    throw new Error(`${label} must be a non-empty array of strings`)
+  }
+  return value
+}
+
+function schemaContract(schema) {
+  const root = requireObject(schema, 'root')
+  const reviewProperties = requireObject(root.properties, 'root.properties')
+  const reviewRequired = requireStringArray(root.required, 'root.required')
+  for (const [key, definition] of Object.entries(reviewProperties)) {
+    requireObject(definition, `root.properties.${key}`)
+  }
+  const findingsSchema = requireObject(reviewProperties.findings, 'root.properties.findings')
+  const findingSchema = requireObject(findingsSchema.items, 'root.properties.findings.items')
+  const findingProperties = requireObject(findingSchema.properties, 'root.properties.findings.items.properties')
+  for (const [key, definition] of Object.entries(findingProperties)) {
+    requireObject(definition, `root.properties.findings.items.properties.${key}`)
+  }
+  const findingRequired = requireStringArray(
+    findingSchema.required,
+    'root.properties.findings.items.required',
+  )
+  const severityValues = requireStringArray(
+    findingProperties.severity?.enum,
+    'root.properties.findings.items.properties.severity.enum',
+  )
+  const confidenceValues = requireStringArray(
+    findingProperties.confidence?.enum,
+    'root.properties.findings.items.properties.confidence.enum',
+  )
+
+  for (const key of reviewRequired) {
+    if (!Object.hasOwn(reviewProperties, key)) {
+      throw new Error(`root.required references missing property "${key}"`)
+    }
+  }
+  for (const key of findingRequired) {
+    if (!Object.hasOwn(findingProperties, key)) {
+      throw new Error(`root.properties.findings.items.required references missing property "${key}"`)
+    }
+  }
+  if (findingsSchema.type !== 'array' || findingSchema.type !== 'object') {
+    throw new Error('findings must be an array of objects')
+  }
+
+  return {
+    reviewProperties,
+    reviewKeys: new Set(Object.keys(reviewProperties)),
+    reviewRequired,
+    findingProperties,
+    findingKeys: new Set(Object.keys(findingProperties)),
+    findingRequired,
+    severityValues,
+    confidenceValues,
+  }
+}
+
+async function loadSchema(path) {
+  let schema
+  try {
+    schema = await readJsonc(path)
+  } catch (error) {
+    throw new Error(`could not load review schema "${path}": ${error.message}`, { cause: error })
+  }
+  if (schema === null) throw new Error(`could not load review schema "${path}": file not found`)
+
+  try {
+    return schemaContract(schema)
+  } catch (error) {
+    throw new Error(`malformed review schema "${path}": ${error.message}`, { cause: error })
+  }
+}
+
+const CONTRACT = await loadSchema(schemaPath)
+
+export const SEVERITIES = CONTRACT.severityValues
+export const CONFIDENCES = CONTRACT.confidenceValues
 
 export function extractJson(text) {
   if (typeof text !== 'string') return null
@@ -40,18 +133,67 @@ function unknownProperty(object, allowed, location) {
   return null
 }
 
+function matchesType(value, type) {
+  if (type === 'null') return value === null
+  if (type === 'array') return Array.isArray(value)
+  if (type === 'object') return isObject(value)
+  if (type === 'integer') return Number.isInteger(value)
+  if (type === 'number') return typeof value === 'number' && Number.isFinite(value)
+  return typeof value === type
+}
+
+function schemaValueError(value, definition, path) {
+  const types = Array.isArray(definition.type) ? definition.type : [definition.type]
+  if (definition.enum && !definition.enum.includes(value)) {
+    return `${path} must be one of ${definition.enum.join(', ')}`
+  }
+  if (definition.type && !types.some(type => matchesType(value, type))) {
+    if (types.includes('string') && definition.minLength > 0) {
+      return `${path} must be a non-empty string`
+    }
+    if (types.includes('integer') && types.includes('null')) {
+      return `${path} must be a positive integer or null`
+    }
+    return `${path} has an invalid type`
+  }
+  if (typeof value === 'string' && definition.minLength !== undefined
+    && value.length < definition.minLength) {
+    return `${path} must be a non-empty string`
+  }
+  if (typeof value === 'number' && definition.minimum !== undefined
+    && value < definition.minimum) {
+    if (types.includes('integer') && types.includes('null')) {
+      return `${path} must be a positive integer or null`
+    }
+    return `${path} must be at least ${definition.minimum}`
+  }
+  return null
+}
+
 export function validateReview(obj) {
   if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) {
     return { ok: false, error: 'review output must be a JSON object' }
   }
 
-  const unknownReviewKey = unknownProperty(obj, REVIEW_KEYS, 'review output')
+  const unknownReviewKey = unknownProperty(obj, CONTRACT.reviewKeys, 'review output')
   if (unknownReviewKey) return { ok: false, error: unknownReviewKey }
+  for (const key of CONTRACT.reviewRequired) {
+    if (!Object.hasOwn(obj, key)) {
+      return {
+        ok: false,
+        error: key === 'findings'
+          ? 'review output requires a "findings" array'
+          : `review output requires a "${key}" field`,
+      }
+    }
+  }
+  for (const [key, definition] of Object.entries(CONTRACT.reviewProperties)) {
+    if (!Object.hasOwn(obj, key) || key === 'findings') continue
+    const error = schemaValueError(obj[key], definition, `"${key}"`)
+    if (error) return { ok: false, error }
+  }
   if (!Array.isArray(obj.findings)) {
     return { ok: false, error: 'review output requires a "findings" array' }
-  }
-  if (obj.summary !== undefined && typeof obj.summary !== 'string') {
-    return { ok: false, error: '"summary" must be a string when present' }
   }
 
   const findings = []
@@ -61,29 +203,21 @@ export function validateReview(obj) {
       return { ok: false, error: `${at} must be an object` }
     }
 
-    const unknownFindingKey = unknownProperty(finding, FINDING_KEYS, at)
+    const unknownFindingKey = unknownProperty(finding, CONTRACT.findingKeys, at)
     if (unknownFindingKey) return { ok: false, error: unknownFindingKey }
-    if (typeof finding.file !== 'string' || !finding.file) {
-      return { ok: false, error: `${at}.file must be a non-empty string` }
+    for (const key of CONTRACT.findingRequired) {
+      if (!Object.hasOwn(finding, key)) {
+        return { ok: false, error: `${at}.${key} is required` }
+      }
     }
-    if (typeof finding.body !== 'string' || !finding.body) {
-      return { ok: false, error: `${at}.body must be a non-empty string` }
-    }
-    if (!SEVERITIES.includes(finding.severity)) {
-      return { ok: false, error: `${at}.severity must be one of ${SEVERITIES.join(', ')}` }
-    }
-    if (!CONFIDENCES.includes(finding.confidence)) {
-      return { ok: false, error: `${at}.confidence must be one of ${CONFIDENCES.join(', ')}` }
-    }
-    if (finding.line !== undefined && finding.line !== null
-      && !(Number.isInteger(finding.line) && finding.line >= 1)) {
-      return { ok: false, error: `${at}.line must be a positive integer or null` }
-    }
-    if (finding.title !== undefined && typeof finding.title !== 'string') {
-      return { ok: false, error: `${at}.title must be a string` }
+    for (const [key, definition] of Object.entries(CONTRACT.findingProperties)) {
+      if (!Object.hasOwn(finding, key)) continue
+      const error = schemaValueError(finding[key], definition, `${at}.${key}`)
+      if (error) return { ok: false, error }
     }
 
     findings.push({
+      ...finding,
       file: finding.file,
       line: finding.line ?? null,
       title: finding.title,
