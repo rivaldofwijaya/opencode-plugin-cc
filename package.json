@@ -5,7 +5,7 @@
   "type": "module",
   "engines": { "node": ">=22" },
   "scripts": {
-    "test": "node --test 'tests/**/*.test.mjs'",
+    "test": "node --test 'tests/unit/**/*.test.mjs' 'tests/integration/**/*.test.mjs' tests/lint-commands.test.mjs",
     "test:isolated": "node --test 'tests/isolated/**/*.test.mjs'",
     "test:live": "OPENCODE_LIVE=1 node --test 'tests/live/**/*.test.mjs'"
   }
