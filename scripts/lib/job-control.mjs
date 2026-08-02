@@ -6,6 +6,7 @@ import { addRef, ensureBroker, releaseRef } from './broker-lifecycle.mjs'
 import { atomicWrite } from './fs.mjs'
 import { spawnDetached, terminate, isAlive, run } from './process.mjs'
 import { jobDir } from './state.mjs'
+import { refsPath } from './broker-endpoint.mjs'
 import {
   createJob,
   updateJob,
@@ -19,6 +20,7 @@ import { readJson } from './state.mjs'
 
 const RECONNECT_DELAYS_MS = [250, 500, 1000, 2000, 4000]
 const STREAM_IDLE_TIMEOUT_MS = 2000
+const WORKER_HANDOFF_TIMEOUT_MS = 10_000
 const WORKER_FLAG = '--opencode-job-worker'
 const WORKER_MODULE = fileURLToPath(import.meta.url)
 
@@ -114,11 +116,11 @@ async function failJob(jobId, error, env) {
   return next
 }
 
-async function holdBrokerRef(ccSessionId, env) {
-  await addRef(ccSessionId, env)
+async function holdBrokerRef(ccSessionId, env, holderToken = randomBytes(24).toString('hex')) {
+  await addRef(ccSessionId, env, holderToken)
   let releasePromise
   return async () => {
-    releasePromise ??= releaseRef(ccSessionId, env)
+    releasePromise ??= releaseRef(ccSessionId, env, holderToken)
     await releasePromise
   }
 }
@@ -277,6 +279,21 @@ async function writeWorkerRequest(jobId, request, env) {
   )
 }
 
+async function waitForWorkerRef(jobId, ccSessionId, workerToken, workerPid, env) {
+  const deadline = Date.now() + WORKER_HANDOFF_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    const refs = await readJson(refsPath(env), {})
+    const holder = refs?.[ccSessionId]?.[workerToken]
+    const owner = await readJson(join(jobDir(jobId, env), 'worker-owner.json'), null)
+    if (holder?.pid === workerPid && owner?.pid === workerPid && owner.workerToken === workerToken) {
+      return holder
+    }
+    if (!isAlive(workerPid)) throw new Error(`opencode job worker exited before acquiring broker ref`)
+    await sleep(25)
+  }
+  throw new Error(`timed out waiting for opencode job worker to acquire broker ref`)
+}
+
 async function spawnWorker(jobId, cwd, env, workerToken, onError) {
   const directory = jobDir(jobId, env)
   const stdout = await open(join(directory, 'worker.stdout.log'), 'a')
@@ -330,6 +347,12 @@ export async function startJob({
   let releaseBrokerRef
   let workerOwnsRef = false
   let executionOwnsRef = false
+  let launcherRefReleased = false
+  const releaseLauncherRef = async () => {
+    if (launcherRefReleased) return
+    await releaseBrokerRef?.()
+    launcherRefReleased = true
+  }
   try {
     releaseBrokerRef = await holdBrokerRef(ccSessionId, env)
     const broker = await ensureBroker({ env })
@@ -345,15 +368,21 @@ export async function startJob({
     if (background) {
       const workerToken = randomBytes(24).toString('hex')
       await writeWorkerRequest(job.id, { sessionID, workerToken, ...promptOptions }, env)
+      let worker
       try {
-        await spawnWorker(job.id, cwd, env, workerToken, async (error) => {
+        worker = await spawnWorker(job.id, cwd, env, workerToken, async (error) => {
           await failJob(job.id, error, env)
-          await releaseBrokerRef?.()
+          if (!workerOwnsRef) await releaseLauncherRef()
         })
+        await waitForWorkerRef(job.id, ccSessionId, workerToken, worker.pid, env)
+        workerOwnsRef = true
+        await releaseLauncherRef()
       } catch (error) {
+        if (worker?.pid && isAlive(worker.pid) && !workerOwnsRef) {
+          await terminate(worker.pid, { graceMs: 1000 })
+        }
         throw error
       }
-      workerOwnsRef = true
       return {
         jobId: job.id,
         sessionID,
@@ -368,7 +397,7 @@ export async function startJob({
     await execution.promptStarted
     return { jobId: job.id, sessionID, done: execution.done }
   } catch (error) {
-    if (!workerOwnsRef && !executionOwnsRef) await releaseBrokerRef?.()
+    if (!executionOwnsRef && (!workerOwnsRef || !launcherRefReleased)) await releaseLauncherRef()
     await failJob(job.id, error, env)
     throw error
   }
@@ -422,13 +451,13 @@ async function runWorker(jobId, env, workerToken) {
   try {
     const current = await readJob(jobId, env)
     if (!current) return current
-    releaseBrokerRef = await holdBrokerRef(current.ccSessionId, env)
-    if (current.state !== 'running') return current
 
     const request = await readJson(join(jobDir(jobId, env), 'worker.json'), null)
     if (!request || request.workerToken !== workerToken) {
       throw new Error(`missing or invalid worker request for ${jobId}`)
     }
+    releaseBrokerRef = await holdBrokerRef(current.ccSessionId, env, request.workerToken)
+    if (current.state !== 'running') return current
     await writeWorkerOwner(jobId, process.pid, workerToken, env)
     await updateJob(jobId, { pid: process.pid }, env)
     const claimed = await readJob(jobId, env)

@@ -282,6 +282,94 @@ async function writeRefs(refs, env) {
   await chmod(refsPath(env), 0o600)
 }
 
+const localHolderTokens = new Map()
+
+function localHolderKey(env, ccSessionId) {
+  return `${refsPath(env)}\u0000${ccSessionId}`
+}
+
+function rememberLocalHolder(env, ccSessionId, holderToken) {
+  const key = localHolderKey(env, ccSessionId)
+  const tokens = localHolderTokens.get(key) ?? []
+  tokens.push(holderToken)
+  localHolderTokens.set(key, tokens)
+}
+
+function forgetLocalHolder(env, ccSessionId, holderToken) {
+  const key = localHolderKey(env, ccSessionId)
+  const tokens = localHolderTokens.get(key)
+  if (!tokens) return
+  const remaining = tokens.filter((token) => token !== holderToken)
+  if (remaining.length) localHolderTokens.set(key, remaining)
+  else localHolderTokens.delete(key)
+}
+
+function legacyHolderToken(ccSessionId, at) {
+  return `legacy:${encodeURIComponent(ccSessionId)}:${at}`
+}
+
+function normalizeRefs(raw) {
+  const refs = {}
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return refs
+
+  for (const [ccSessionId, value] of Object.entries(raw)) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      refs[ccSessionId] = {
+        [legacyHolderToken(ccSessionId, value)]: { pid: null, at: value },
+      }
+      continue
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+
+    const holders = {}
+    for (const [holderToken, holder] of Object.entries(value)) {
+      if (!holder || typeof holder !== 'object' || Array.isArray(holder)) continue
+      if (!Number.isFinite(holder.at)) continue
+      holders[holderToken] = {
+        pid: Number.isInteger(holder.pid) ? holder.pid : null,
+        at: holder.at,
+      }
+    }
+    if (Object.keys(holders).length) refs[ccSessionId] = holders
+  }
+  return refs
+}
+
+function pruneDeadHolders(refs) {
+  for (const [ccSessionId, holders] of Object.entries(refs)) {
+    for (const [holderToken, holder] of Object.entries(holders)) {
+      if (Number.isInteger(holder.pid) && !isAlive(holder.pid)) delete holders[holderToken]
+    }
+    if (!Object.keys(holders).length) delete refs[ccSessionId]
+  }
+  return refs
+}
+
+function pruneUnknownSessions(refs, known) {
+  for (const ccSessionId of Object.keys(refs)) {
+    if (!known.has(ccSessionId)) delete refs[ccSessionId]
+  }
+  return refs
+}
+
+function holderCount(refs) {
+  return Object.values(refs).reduce((count, holders) => count + Object.keys(holders).length, 0)
+}
+
+function chooseLegacyReleaseToken(ccSessionId, env, holders) {
+  const key = localHolderKey(env, ccSessionId)
+  const local = localHolderTokens.get(key) ?? []
+  for (let index = local.length - 1; index >= 0; index -= 1) {
+    const token = local[index]
+    if (holders[token]) return token
+  }
+
+  const owned = Object.entries(holders)
+    .filter(([, holder]) => holder.pid === process.pid)
+    .sort(([, a], [, b]) => a.at - b.at)
+  return owned[0]?.[0] ?? Object.keys(holders)[0]
+}
+
 function addKnownValue(set, value) {
   if (typeof value === 'string' && value) set.add(value)
 }
@@ -321,13 +409,21 @@ async function knownSessions(env) {
   return known
 }
 
-export async function addRef(ccSessionId, env = process.env) {
+// Counts returned by addRef/releaseRef are live holder records, not sessions.
+// A single Claude Code session can therefore contribute several references.
+export async function addRef(ccSessionId, env = process.env, holderToken) {
   return await withLock(env, async () => {
-    const refs = await readJson(refsPath(env), {})
-    const next = refs && typeof refs === 'object' && !Array.isArray(refs) ? refs : {}
-    next[ccSessionId] = Date.now()
+    const next = pruneDeadHolders(normalizeRefs(await readJson(refsPath(env), {})))
+    const token = typeof holderToken === 'string' && holderToken
+      ? holderToken
+      : randomBytes(24).toString('hex')
+    const holders = next[ccSessionId] ?? {}
+    if (holders[token]) throw new Error(`broker holder token is already in use: ${token}`)
+    holders[token] = { pid: process.pid, at: Date.now() }
+    next[ccSessionId] = holders
     await writeRefs(next, env)
-    return Object.keys(next).length
+    rememberLocalHolder(env, ccSessionId, token)
+    return holderCount(next)
   })
 }
 
@@ -349,19 +445,26 @@ async function shutdownBrokerLocked(env) {
   return outcome
 }
 
-export async function releaseRef(ccSessionId, env = process.env) {
+export async function releaseRef(ccSessionId, env = process.env, holderToken) {
   return await withLock(env, async () => {
-    const refs = await readJson(refsPath(env), {})
-    const next = refs && typeof refs === 'object' && !Array.isArray(refs) ? refs : {}
-    delete next[ccSessionId]
+    const next = pruneDeadHolders(normalizeRefs(await readJson(refsPath(env), {})))
+    const holders = next[ccSessionId]
+    if (holders) {
+      const token = typeof holderToken === 'string' && holderToken
+        ? holderToken
+        : chooseLegacyReleaseToken(ccSessionId, env, holders)
+      if (token && holders[token]) {
+        delete holders[token]
+        forgetLocalHolder(env, ccSessionId, token)
+      }
+      if (!Object.keys(holders).length) delete next[ccSessionId]
+    }
 
     const known = await knownSessions(env)
-    for (const id of Object.keys(next)) {
-      if (!known.has(id)) delete next[id]
-    }
+    pruneUnknownSessions(next, known)
     await writeRefs(next, env)
 
-    const remaining = Object.keys(next).length
+    const remaining = holderCount(next)
     if (remaining > 0) return { remaining, shutdown: false }
     await shutdownBrokerLocked(env)
     return { remaining: 0, shutdown: true }
