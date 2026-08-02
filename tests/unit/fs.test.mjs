@@ -22,7 +22,11 @@ test('atomicWrite honours mode 0600', async () => {
   assert.equal((await stat(f)).mode & 0o777, 0o600)
 })
 
-test('atomicWrite overwrites an existing file without truncating on failure', async () => {
+test('atomicWrite overwrites an existing file without truncating on failure', {
+  skip: process.getuid?.() === 0
+    ? 'root bypasses directory permission bits so failure cannot be injected this way'
+    : false,
+}, async () => {
   const d = await tmp()
   const f = join(d, 'a.json')
   await writeFile(f, 'old')
