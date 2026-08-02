@@ -1,6 +1,6 @@
 import { join } from 'node:path'
-import { access } from 'node:fs/promises'
-import { readJsonc, mergeWriteJson } from './fs.mjs'
+import { access, readFile } from 'node:fs/promises'
+import { readJsonc, mergeWriteJson, stripJsonComments } from './fs.mjs'
 
 export const CONFIG_SCHEMA_URL = 'https://opencode.ai/config.json'
 
@@ -50,15 +50,26 @@ export async function configTargetPath({ scope, env = process.env, cwd = process
   return candidates[0]
 }
 
+async function containsComments(path) {
+  try {
+    const raw = await readFile(path, 'utf8')
+    return raw !== stripJsonComments(raw)
+  } catch (error) {
+    if (error.code === 'ENOENT') return false
+    throw error
+  }
+}
+
 export async function setModel({ model, scope, env = process.env, cwd = process.cwd() }) {
   if (!model || !String(model).includes('/')) {
     throw new Error(`model must be in provider/model form, got: ${model}`)
   }
   const path = await configTargetPath({ scope, env, cwd })
+  const commentsDropped = await containsComments(path)
   const { backup, created } = await mergeWriteJson(
     path,
     { model },
     { schemaUrl: CONFIG_SCHEMA_URL },
   )
-  return { path, backup, created }
+  return { path, backup, created, commentsDropped }
 }

@@ -51,19 +51,31 @@ test('configTargetPath defaults to opencode.json when nothing exists', async () 
 test('setModel merges into an existing .jsonc and preserves siblings', async () => {
   const s = await sandbox()
   const f = join(s.globalDir, 'opencode.jsonc')
-  await writeFile(f, '{\n  // keep me\n  "theme": "dark",\n  "model": "old/m"\n}')
+  const original = '{\n  // keep me\n  "theme": "dark",\n  "model": "old/m"\n}'
+  await writeFile(f, original)
   const res = await setModel({ model: 'new/m', scope: 'global', env: s.env, cwd: s.cwd })
   assert.equal(res.path, f)
+  assert.equal(res.commentsDropped, true)
+  assert.equal(await readFile(res.backup, 'utf8'), original)
   const out = JSON.parse(await readFile(f, 'utf8'))
   assert.equal(out.theme, 'dark')
   assert.equal(out.model, 'new/m')
   assert.equal(res.backup, f + '.bak')
 })
 
+test('setModel reports no dropped comments for an existing comment-free .json', async () => {
+  const s = await sandbox()
+  const f = join(s.globalDir, 'opencode.json')
+  await writeFile(f, '{"theme":"dark","model":"old/m"}')
+  const res = await setModel({ model: 'new/m', scope: 'global', env: s.env, cwd: s.cwd })
+  assert.equal(res.commentsDropped, false)
+})
+
 test('setModel creates a new config with $schema', async () => {
   const s = await sandbox()
   const res = await setModel({ model: 'openrouter/x', scope: 'project', env: s.env, cwd: s.cwd })
   assert.equal(res.created, true)
+  assert.equal(res.commentsDropped, false)
   const out = JSON.parse(await readFile(res.path, 'utf8'))
   assert.equal(out.$schema, CONFIG_SCHEMA_URL)
   assert.equal(out.model, 'openrouter/x')
