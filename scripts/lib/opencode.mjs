@@ -53,8 +53,8 @@ export function compareVersions(a, b) {
 
 export const meetsFloor = (version) => compareVersions(version, MIN_VERSION) >= 0
 
-export async function binaryVersion(binPath) {
-  const { stdout } = await execFileAsync(binPath, ['--version'], { timeout: 20000 })
+export async function binaryVersion(binPath, { env = process.env } = {}) {
+  const { stdout } = await execFileAsync(binPath, ['--version'], { timeout: 20000, env })
   const m = stdout.match(/(\d+\.\d+\.\d+)/)
   if (!m) throw new Error(`could not parse opencode version from: ${stdout.trim()}`)
   return m[1]
