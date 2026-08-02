@@ -25,6 +25,7 @@ export function run(cmd, args, { cwd, env, timeoutMs = 120000, input } = {}) {
     let killTimer
 
     const timer = setTimeout(() => {
+      if (settled) return
       timedOut = true
       child.kill('SIGTERM')
       killTimer = setTimeout(() => {
@@ -32,24 +33,26 @@ export function run(cmd, args, { cwd, env, timeoutMs = 120000, input } = {}) {
       }, TIMEOUT_KILL_GRACE_MS)
     }, timeoutValue(timeoutMs, 120000))
 
+    const settle = (callback) => {
+      if (settled) return false
+      settled = true
+      clearTimeout(timer)
+      clearTimeout(killTimer)
+      callback()
+      return true
+    }
+
     child.stdout.on('data', (data) => { stdout += data.toString() })
     child.stderr.on('data', (data) => { stderr += data.toString() })
     child.stdin.on('error', (error) => {
-      if (error.code !== 'EPIPE') reject(error)
+      if (settled) return
+      if (error.code !== 'EPIPE') settle(() => reject(error))
     })
     child.on('error', (error) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      clearTimeout(killTimer)
-      reject(error)
+      settle(() => reject(error))
     })
     child.on('close', (code) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      clearTimeout(killTimer)
-      resolve({ code, stdout, stderr, timedOut })
+      settle(() => resolve({ code, stdout, stderr, timedOut }))
     })
 
     if (input !== undefined) child.stdin.end(input)

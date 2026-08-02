@@ -16,15 +16,20 @@ const loopbackAvailable = await new Promise((resolve) => {
 })
 
 async function waitForPort(child) {
+  return (await waitForServer(child)).port
+}
+
+async function waitForServer(child) {
   return new Promise((resolve, reject) => {
     let output = ''
     const timer = setTimeout(() => reject(new Error(`fixture never printed a port: ${output}`)), 10000)
     const onData = (data) => {
       output += String(data)
-      const match = output.match(/listening on http:\/\/[^:]+:(\d+)/)
+      const match = output.match(/listening on http:\/\/([^:]+):(\d+)/)
       if (match) {
         clearTimeout(timer)
-        resolve(Number(match[1]))
+        child.stdout.off('data', onData)
+        resolve({ hostname: match[1], port: Number(match[2]) })
       }
     }
     child.stdout.on('data', onData)
@@ -32,7 +37,24 @@ async function waitForPort(child) {
       clearTimeout(timer)
       reject(error)
     })
+    child.once('close', (code) => {
+      clearTimeout(timer)
+      reject(new Error(`fixture exited before listening (code ${code}): ${output}`))
+    })
   })
+}
+
+async function availablePort() {
+  const server = createServer()
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const port = server.address().port
+  await new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()))
+  })
+  return port
 }
 
 async function collectEvents(response, stop) {
@@ -126,6 +148,40 @@ test('fixture can use provider env as an override when auth.json is absent', asy
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('fixture gives identical results for space and equals-valued serve flags', { skip: !loopbackAvailable }, async () => {
+  const port = await availablePort()
+  const results = []
+  const invocations = [
+    ['serve', '--port', String(port), '--hostname', '0.0.0.0'],
+    ['serve', `--port=${port}`, '--hostname=0.0.0.0'],
+  ]
+
+  for (const args of invocations) {
+    const child = spawnDetached(bin, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+
+    try {
+      const listening = await waitForServer(child)
+      assert.deepEqual(listening, { hostname: '0.0.0.0', port })
+      const doc = await fetch(`http://127.0.0.1:${port}/doc`)
+      results.push({ status: doc.status, body: await doc.json() })
+    } finally {
+      await terminate(child.pid)
+      assert.equal(isAlive(child.pid), false)
+    }
+  }
+
+  assert.deepEqual(results[1], results[0])
+})
+
+test('fixture does not silently ignore an equals-form port value', async () => {
+  const r = await run(bin, ['serve', '--port=65536', '--hostname=0.0.0.0'], { timeoutMs: 1000 })
+  assert.equal(r.timedOut, false)
+  assert.equal(r.code, 1)
+  assert.match(r.stderr, /ERR_SOCKET_BAD_PORT/)
 })
 
 test('fixture serve answers /doc and replays typed SSE events', { skip: !loopbackAvailable }, async () => {
