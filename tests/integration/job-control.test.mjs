@@ -1,13 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { run, isAlive, terminate } from '../../scripts/lib/process.mjs'
+import { run, isAlive, terminate, spawnDetached } from '../../scripts/lib/process.mjs'
 import { startJob, runForeground, cancelJob } from '../../scripts/lib/job-control.mjs'
-import { readJob, readEvents, readResult, lastOpencodeSession } from '../../scripts/lib/tracked-jobs.mjs'
-import { shutdownBroker } from '../../scripts/lib/broker-lifecycle.mjs'
+import { createJob, readJob, readEvents, readResult, lastOpencodeSession, updateJob } from '../../scripts/lib/tracked-jobs.mjs'
+import { refsPath } from '../../scripts/lib/broker-endpoint.mjs'
+import { readJson } from '../../scripts/lib/state.mjs'
 
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
 const repoCwd = fileURLToPath(new URL('../..', import.meta.url))
@@ -23,15 +24,13 @@ const sandbox = async (extra = {}) => ({
 const bindFailure = (error) => /EACCES|EPERM|EADDRNOTAVAIL|loopback|listen/i.test(String(error?.message || error))
 
 async function stopJob(jobId, env) {
-  const job = jobId ? await readJob(jobId, env) : null
-  if (job?.pid && job.pid !== process.pid && isAlive(job.pid)) {
-    await terminate(job.pid, { graceMs: 1000 })
-  }
-  await shutdownBroker(env)
+  if (!jobId) return
+  await cancelJob(jobId, env).catch(() => {})
 }
 
 test('a foreground job runs to done and captures text, events, and counters', async (t) => {
   const env = await sandbox()
+  const startingRefs = await readJson(refsPath(env), {})
   let job
   try {
     job = await runForeground({
@@ -46,6 +45,7 @@ test('a foreground job runs to done and captures text, events, and counters', as
     assert.match(result, /"findings"/)
     assert.ok((await readEvents(job.id, env)).length > 0)
     assert.equal(await lastOpencodeSession('cc-1', env), job.sessionID)
+    assert.deepEqual(await readJson(refsPath(env), {}), startingRefs)
   } catch (error) {
     if (bindFailure(error)) {
       t.skip(`loopback binding is unavailable in this sandbox: ${error.message}`)
@@ -55,6 +55,53 @@ test('a foreground job runs to done and captures text, events, and counters', as
   } finally {
     await stopJob(job?.id, env)
   }
+})
+
+test('a foreground failure releases its broker reference', async (t) => {
+  const env = await sandbox()
+  const scriptPath = join(env.XDG_STATE_HOME, 'failure-events.jsonl')
+  await writeFile(scriptPath, `${JSON.stringify({
+    type: 'session.error',
+    properties: { error: { name: 'FixtureFailure' } },
+  })}\n`)
+  const startingRefs = await readJson(refsPath(env), {})
+  let job
+  try {
+    job = await runForeground({
+      ccSessionId: 'cc-failure',
+      verb: 'review',
+      prompt: 'p',
+      cwd: repoCwd,
+      env: { ...env, FAKE_OPENCODE_SCRIPT: scriptPath },
+    })
+    assert.equal(job.state, 'failed')
+    assert.deepEqual(await readJson(refsPath(env), {}), startingRefs)
+  } catch (error) {
+    if (bindFailure(error)) {
+      t.skip(`loopback binding is unavailable in this sandbox: ${error.message}`)
+      return
+    }
+    throw error
+  } finally {
+    await stopJob(job?.id, env)
+  }
+})
+
+test('a foreground startup failure releases its broker reference', async () => {
+  const env = await sandbox({ FAKE_OPENCODE_FAULT: 'nonzero-exit' })
+  const startingRefs = await readJson(refsPath(env), {})
+  await assert.rejects(
+    () => startJob({
+      ccSessionId: 'cc-startup-failure',
+      verb: 'review',
+      prompt: 'p',
+      cwd: repoCwd,
+      background: false,
+      env,
+    }),
+    /opencode broker exited|would not start/,
+  )
+  assert.deepEqual(await readJson(refsPath(env), {}), startingRefs)
 })
 
 test('a background start returns immediately and settles later', async (t) => {
@@ -81,6 +128,7 @@ test('a background start returns immediately and settles later', async (t) => {
 
 test('cancelJob aborts a running foreground job', async (t) => {
   const env = await sandbox({ FAKE_OPENCODE_EVENT_DELAY_MS: '300' })
+  const startingRefs = await readJson(refsPath(env), {})
   let jobId
   try {
     const started = await startJob({
@@ -91,6 +139,7 @@ test('cancelJob aborts a running foreground job', async (t) => {
     const settled = await started.done
     assert.equal(settled.state, 'cancelled')
     assert.equal((await readJob(jobId, env)).state, 'cancelled')
+    assert.deepEqual(await readJson(refsPath(env), {}), startingRefs)
   } catch (error) {
     if (bindFailure(error)) {
       t.skip(`loopback binding is unavailable in this sandbox: ${error.message}`)
@@ -99,6 +148,22 @@ test('cancelJob aborts a running foreground job', async (t) => {
     throw error
   } finally {
     await stopJob(jobId, env)
+  }
+})
+
+test('cancelJob does not signal a foreign PID', async () => {
+  const env = await sandbox()
+  const foreign = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  try {
+    const job = await createJob({
+      ccSessionId: 'cc-foreign', verb: 'task', cwd: repoCwd, background: true,
+    }, env)
+    await updateJob(job.id, { pid: foreign.pid }, env)
+    assert.equal(await cancelJob(job.id, env), 'cancelled')
+    assert.equal((await readJob(job.id, env)).state, 'cancelled')
+    assert.equal(isAlive(foreign.pid), true)
+  } finally {
+    if (isAlive(foreign.pid)) await terminate(foreign.pid, { graceMs: 1000 })
   }
 })
 
@@ -129,6 +194,7 @@ test('an SSE disconnect mid-job reconnects and reaches a terminal state', async 
 
 test('a detached background worker completes after its launcher exits', async (t) => {
   const env = await sandbox({ FAKE_OPENCODE_EVENT_DELAY_MS: '20' })
+  const startingRefs = await readJson(refsPath(env), {})
   let jobId
   try {
     const jobControlUrl = new URL('../../scripts/lib/job-control.mjs', import.meta.url).href
@@ -179,6 +245,7 @@ test('a detached background worker completes after its launcher exits', async (t
     assert.notEqual(report.job.pid, launchRecord.launcherPid)
     assert.ok(report.eventCount > 0)
     assert.match(report.result, /"findings"/)
+    assert.deepEqual(await readJson(refsPath(env), {}), startingRefs)
   } catch (error) {
     if (bindFailure(error)) {
       t.skip(`loopback binding is unavailable in this sandbox: ${error.message}`)
