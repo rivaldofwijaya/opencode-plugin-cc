@@ -5,25 +5,27 @@ import { fileURLToPath } from 'node:url'
 const promptsDir = fileURLToPath(new URL('../../prompts/', import.meta.url))
 const promptNamePattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
-export async function listPrompts() {
-  return (await readdir(promptsDir))
+export async function listPrompts(directory = promptsDir) {
+  return (await readdir(directory))
     .filter(file => file.endsWith('.md'))
     .map(file => file.slice(0, -3))
     .sort()
 }
 
-export async function loadPrompt(name, vars = {}) {
+export async function loadPrompt(name, vars = {}, { directory = promptsDir } = {}) {
   if (typeof name !== 'string' || !promptNamePattern.test(name)) {
     throw new Error(`unknown prompt template: ${name}`)
   }
 
+  const path = join(directory, `${name}.md`)
   let text
   try {
-    text = await readFile(join(promptsDir, `${name}.md`), 'utf8')
+    text = await readFile(path, 'utf8')
   } catch (error) {
     if (error?.code === 'ENOENT') throw new Error(`unknown prompt template: ${name}`)
     throw error
   }
+  if (!text.trim()) throw new Error(`prompt file is empty: ${path}`)
 
   const values = vars !== null && typeof vars === 'object' ? vars : {}
   const substitutions = { ...values }
