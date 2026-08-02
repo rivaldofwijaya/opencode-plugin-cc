@@ -55,6 +55,8 @@ function loadScript() {
 }
 
 function flag(name, fallback) {
+  const inline = argv.find((argument) => argument.startsWith(`${name}=`))
+  if (inline !== undefined) return inline.slice(name.length + 1)
   const index = argv.indexOf(name)
   return index !== -1 && argv[index + 1] !== undefined ? argv[index + 1] : fallback
 }

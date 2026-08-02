@@ -38,6 +38,14 @@ test('run writes input to stdin', async () => {
   assert.equal(r.stdout, 'ping')
 })
 
+test('run resolves when the child exits while stdin reports EPIPE', async () => {
+  const r = await run('node', ['-e', 'process.exit(0)'], {
+    input: 'x'.repeat(10_000_000),
+  })
+  assert.equal(r.code, 0)
+  assert.equal(r.timedOut, false)
+})
+
 test('terminate stops a detached child and isAlive goes false', async () => {
   const child = spawnDetached('node', ['-e', 'setInterval(()=>{}, 1000)'])
   assert.equal(isAlive(child.pid), true)
