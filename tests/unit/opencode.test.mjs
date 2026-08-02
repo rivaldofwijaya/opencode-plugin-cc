@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, chmod } from 'node:fs/promises'
+import { mkdtemp, writeFile, chmod, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -35,6 +35,21 @@ test('OPENCODE_BIN wins over everything', async () => {
   assert.deepEqual(r, { path: p, source: 'env' })
 })
 
+test('OPENCODE_BIN takes precedence over PATH and ~/.opencode/bin', async () => {
+  clearBinaryCache()
+  const envDir = await mkdtemp(join(tmpdir(), 'ocenv-'))
+  const pathDir = await mkdtemp(join(tmpdir(), 'ocpath-'))
+  const home = await mkdtemp(join(tmpdir(), 'ochome-'))
+  await mkdir(join(home, '.opencode', 'bin'), { recursive: true })
+  const envBinary = await fakeBin(envDir, 'opencode-env')
+  const pathBinary = await fakeBin(pathDir)
+  const homeBinary = await fakeBin(join(home, '.opencode', 'bin'))
+  const r = await resolveBinary({ env: { OPENCODE_BIN: envBinary, PATH: pathDir, HOME: home } })
+  assert.deepEqual(r, { path: envBinary, source: 'env' })
+  assert.notEqual(envBinary, pathBinary)
+  assert.notEqual(envBinary, homeBinary)
+})
+
 test('PATH is used when OPENCODE_BIN is unset', async () => {
   clearBinaryCache()
   const d = await mkdtemp(join(tmpdir(), 'ocbin-'))
@@ -43,14 +58,50 @@ test('PATH is used when OPENCODE_BIN is unset', async () => {
   assert.deepEqual(r, { path: p, source: 'path' })
 })
 
+test('PATH takes precedence over ~/.opencode/bin when OPENCODE_BIN is unset', async () => {
+  clearBinaryCache()
+  const pathDir = await mkdtemp(join(tmpdir(), 'ocpath-'))
+  const home = await mkdtemp(join(tmpdir(), 'ochome-'))
+  await mkdir(join(home, '.opencode', 'bin'), { recursive: true })
+  const pathBinary = await fakeBin(pathDir)
+  const homeBinary = await fakeBin(join(home, '.opencode', 'bin'))
+  const r = await resolveBinary({ env: { PATH: pathDir, HOME: home } })
+  assert.deepEqual(r, { path: pathBinary, source: 'path' })
+  assert.notEqual(pathBinary, homeBinary)
+})
+
 test('~/.opencode/bin is used when PATH misses', async () => {
   clearBinaryCache()
   const home = await mkdtemp(join(tmpdir(), 'ochome-'))
-  const { mkdir } = await import('node:fs/promises')
   await mkdir(join(home, '.opencode', 'bin'), { recursive: true })
   const p = await fakeBin(join(home, '.opencode', 'bin'))
   const r = await resolveBinary({ env: { PATH: '/nonexistent', HOME: home } })
   assert.deepEqual(r, { path: p, source: 'home' })
+})
+
+test('~/.opencode/bin takes precedence over ~/.local/bin when PATH is empty', async () => {
+  clearBinaryCache()
+  const home = await mkdtemp(join(tmpdir(), 'ochome-'))
+  const opencodeDir = join(home, '.opencode', 'bin')
+  const localDir = join(home, '.local', 'bin')
+  await mkdir(opencodeDir, { recursive: true })
+  await mkdir(localDir, { recursive: true })
+  const homeBinary = await fakeBin(opencodeDir)
+  const localBinary = await fakeBin(localDir)
+  const r = await resolveBinary({ env: { PATH: '', HOME: home } })
+  assert.deepEqual(r, { path: homeBinary, source: 'home' })
+  assert.notEqual(homeBinary, localBinary)
+})
+
+test('PATH uses the earliest entry with an executable', async () => {
+  clearBinaryCache()
+  const earlyDir = await mkdtemp(join(tmpdir(), 'ocpath-early-'))
+  const lateDir = await mkdtemp(join(tmpdir(), 'ocpath-late-'))
+  const earlyBinary = await fakeBin(earlyDir)
+  const lateBinary = await fakeBin(lateDir)
+  const r = await resolveBinary({ env: { PATH: `${earlyDir}:${lateDir}`, HOME: '/nonexistent' } })
+  assert.deepEqual(r, { path: earlyBinary, source: 'path' })
+  assert.notEqual(earlyBinary, lateBinary)
 })
 
 test('missing binary throws a named error', async () => {
