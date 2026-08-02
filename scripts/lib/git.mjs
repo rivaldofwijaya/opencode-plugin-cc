@@ -8,7 +8,11 @@ const MAX_UNTRACKED_BYTES = 64 * 1024
 const TRUNCATION_MARKER = '\n\n[diff truncated]\n'
 
 async function git(args, { cwd = process.cwd(), env = process.env, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-  return run('git', args, { cwd, env, timeoutMs })
+  return run('git', args, {
+    cwd,
+    env: { ...env, LC_ALL: 'C', LANG: 'C' },
+    timeoutMs,
+  })
 }
 
 function gitCommand(args) {
@@ -30,14 +34,6 @@ function requireGitSuccess(args, result) {
 
 function unparseableGitOutput(args, output) {
   return new Error(`${gitCommand(args)} returned unparseable output: ${JSON.stringify(output)}`)
-}
-
-function hasNoUpstreamMessage(result) {
-  if (result.code !== 128) return false
-  const stderr = result.stderr.trim()
-  return /^fatal: no upstream configured for branch '.+'$/.test(stderr)
-    || stderr === 'fatal: HEAD does not point to a branch'
-    || /^fatal: no such branch: '.+'$/.test(stderr)
 }
 
 function noBaseCandidate() {
@@ -68,17 +64,15 @@ async function refExists(cwd, ref, env) {
 }
 
 export async function defaultBase(cwd = process.cwd(), env = process.env) {
-  const upstreamArgs = ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']
-  const upstream = await git(
-    upstreamArgs,
-    { cwd, env },
-  )
-  if (upstream.code === 0 && !upstream.timedOut) {
+  const branchArgs = ['branch', '--show-current']
+  const branchResult = requireGitSuccess(branchArgs, await git(branchArgs, { cwd, env }))
+  const branch = branchResult.stdout.trim()
+  if (branch !== '') {
+    const upstreamArgs = ['for-each-ref', '--format=%(upstream:short)', `refs/heads/${branch}`]
+    const upstream = requireGitSuccess(upstreamArgs, await git(upstreamArgs, { cwd, env }))
     const resolved = upstream.stdout.trim()
     if (resolved !== '') return resolved
-    throw unparseableGitOutput(upstreamArgs, upstream.stdout)
   }
-  if (!hasNoUpstreamMessage(upstream)) throw gitFailure(upstreamArgs, upstream)
 
   for (const ref of ['origin/main', 'origin/master', 'main', 'master']) {
     if (await refExists(cwd, ref, env)) return ref

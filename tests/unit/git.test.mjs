@@ -167,10 +167,10 @@ test('resolveScope reports a rev-list failure instead of falling back', async ()
 
 test('defaultBase reports an upstream lookup failure instead of falling back', async () => {
   const r = await repo()
-  const env = await envWithFailingRevParse('@{u}')
+  const env = await envWithFailingGit('for-each-ref')
   await assert.rejects(
     () => defaultBase(r.dir, env),
-    /git rev-parse --abbrev-ref --symbolic-full-name @\{u\} exited with code 42: forced rev-parse @\{u\} failure/,
+    /git for-each-ref --format=%\(upstream:short\) refs\/heads\/main exited with code 42: forced for-each-ref failure/,
   )
 })
 
@@ -211,6 +211,13 @@ test('defaultBase handles local main, detached HEAD, and an empty repository', a
     () => resolveScope({ cwd: empty.dir, scope: 'branch' }),
     /no base candidate exists; pass --base/,
   )
+})
+
+test('defaultBase resolves a no-upstream branch through candidates under a non-English locale', async () => {
+  const r = await repo({ branch: 'topic' })
+  await r.git('branch', 'main')
+  const env = { ...gitEnv, LANG: 'fr_FR.UTF-8', LC_ALL: 'fr_FR.UTF-8' }
+  assert.equal(await defaultBase(r.dir, env), 'main')
 })
 
 test('defaultBase requires an explicit base for a committed branch without candidates', async () => {
@@ -277,6 +284,10 @@ test('collectDiff is byte-accurate around the 64 KiB boundary', async () => {
   const limited = await collectDiff({ cwd: r.dir, scope: 'working-tree', base: null, maxBytes: 65535 })
   assert.equal(limited.truncated, true)
   assert.ok(Buffer.byteLength(limited.text) <= 65535)
+
+  const small = await collectDiff({ cwd: r.dir, scope: 'working-tree', base: null, maxBytes: 32 })
+  assert.equal(small.truncated, true)
+  assert.ok(Buffer.byteLength(small.text) <= 32)
 })
 
 test('collectDiff on a branch scope diffs against the merge base', async () => {
