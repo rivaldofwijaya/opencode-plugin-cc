@@ -57,10 +57,54 @@ test('setKey rejects an empty provider or key', async () => {
   const env = await home()
   await assert.rejects(() => setKey({ provider: '', key: 'k', env }), /provider/)
   await assert.rejects(() => setKey({ provider: 'p', key: '', env }), /key/)
+  await assert.rejects(() => setKey({ provider: 'p', key: ' ', env }), /key/)
 })
 
 test('setKey never returns the raw key', async () => {
   const env = await home()
   const res = await setKey({ provider: 'openrouter', key: 'sk-or-secret-tail', env })
   assert.equal(JSON.stringify(res).includes('secret'), false)
+})
+
+test('setKey redacts short keys without revealing a substring', async () => {
+  const cases = [
+    ['12345678', '****5678'],
+    ['abcdefg', '****'],
+    ['abcd', '****'],
+    ['z', '****'],
+    ['  x  ', '****'],
+  ]
+
+  for (const [key, expected] of cases) {
+    const env = await home()
+    const res = await setKey({ provider: 'openrouter', key, env })
+    assert.equal(res.redacted, expected)
+
+    if (key.length < 8) {
+      for (let start = 0; start < key.length; start++) {
+        for (let end = start + 1; end <= key.length; end++) {
+          assert.equal(res.redacted.includes(key.slice(start, end)), false)
+        }
+      }
+    }
+  }
+})
+
+test('setKey does not expose a raw key from a merge failure', async () => {
+  const env = await home()
+  const rawKey = 'raw-key-from-merge-error'
+  const key = {
+    toJSON() {
+      throw new Error(`merged credential contains ${rawKey}`)
+    },
+  }
+
+  await assert.rejects(
+    () => setKey({ provider: 'openrouter', key, env }),
+    error => {
+      assert.equal(error.message, 'set-key failed')
+      assert.equal(error.message.includes(rawKey), false)
+      return true
+    },
+  )
 })

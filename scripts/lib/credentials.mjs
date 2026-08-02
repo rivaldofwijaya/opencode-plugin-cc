@@ -29,17 +29,36 @@ export async function envProviderHints(env = process.env) {
 }
 
 function redact(key) {
-  return '****' + String(key).slice(-4)
+  const value = String(key)
+  return value.length >= 8 ? '****' + value.slice(-4) : '****'
 }
 
 export async function setKey({ provider, key, env = process.env }) {
-  if (!provider || !String(provider).trim()) throw new Error('set-key requires a non-empty --provider')
-  if (!key || !String(key).trim()) throw new Error('set-key requires a non-empty --key')
-  const path = authFilePath(env)
-  const { backup, created } = await mergeWriteJson(
-    path,
-    { [provider]: { type: 'api', key } },
-    { mode: 0o600 },
-  )
-  return { provider, redacted: redact(key), backup, created, path }
+  let providerText
+  try {
+    providerText = String(provider)
+  } catch {
+    throw new Error('set-key requires a non-empty --provider')
+  }
+  if (!provider || !providerText.trim()) throw new Error('set-key requires a non-empty --provider')
+
+  let keyText
+  try {
+    keyText = String(key)
+  } catch {
+    throw new Error('set-key requires a non-empty --key')
+  }
+  if (!key || !keyText.trim()) throw new Error('set-key requires a non-empty --key')
+
+  try {
+    const path = authFilePath(env)
+    const { backup, created } = await mergeWriteJson(
+      path,
+      { [provider]: { type: 'api', key } },
+      { mode: 0o600 },
+    )
+    return { provider, redacted: redact(keyText), backup, created, path }
+  } catch {
+    throw new Error('set-key failed')
+  }
 }
