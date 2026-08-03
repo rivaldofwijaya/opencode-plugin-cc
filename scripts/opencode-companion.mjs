@@ -98,8 +98,8 @@ function closestFlag(raw, spec) {
   return distance <= Math.max(1, Math.floor(target.length / 3)) ? closest : null
 }
 
-function validateInvocation({ verb, flags, positional, flagTokens }) {
-  const spec = COMMAND_SPECS[verb]
+function validateInvocation({ verb, flags, positional, flagTokens, commandSpec }) {
+  const spec = commandSpec ?? COMMAND_SPECS[verb]
   if (!spec) throw new Error(`internal error: no command specification for ${verb}`)
 
   for (const token of flagTokens) {
@@ -109,6 +109,12 @@ function validateInvocation({ verb, flags, positional, flagTokens }) {
       const hint = suggestion ? `; did you mean ${suggestion}?` : ''
       throw new CompanionError(
         `invalid invocation: unknown flag ${token.raw} for ${verb}${hint}`,
+        EXIT_CODES.INVALID_INVOCATION,
+      )
+    }
+    if (token.missingValue) {
+      throw new CompanionError(
+        `invalid invocation: flag ${token.raw} for ${verb} requires a value`,
         EXIT_CODES.INVALID_INVOCATION,
       )
     }
@@ -142,7 +148,10 @@ function checkedHandlerResult(result) {
 }
 
 async function main(argv, env = process.env, cwd = process.cwd()) {
-  const { verb, flags, positional, flagTokens } = parseArgs(argv, { includeFlagTokens: true })
+  const { verb, flags, positional, flagTokens } = parseArgs(argv, {
+    includeFlagTokens: true,
+    commandSpecs: COMMAND_SPECS,
+  })
   if (!verb && (argv.length === 0 || (argv.length === 1 && argv[0] === '--help'))) {
     process.stdout.write(usage() + '\n')
     return EXIT_CODES.SUCCESS
@@ -188,4 +197,4 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   process.exitCode = await main(process.argv.slice(2))
 }
 
-export { main, handlers, usage }
+export { main, handlers, usage, validateInvocation }

@@ -6,7 +6,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runDoctor, requireReady, CompanionError } from '../../scripts/lib/doctor.mjs'
 import { readEndpoint } from '../../scripts/lib/broker-endpoint.mjs'
-import { ensureBroker, shutdownBroker } from '../../scripts/lib/broker-lifecycle.mjs'
+import { ensureBroker, addRef, releaseRef, shutdownBroker } from '../../scripts/lib/broker-lifecycle.mjs'
+import { sessionsDir } from '../../scripts/lib/state.mjs'
 import { isAlive } from '../../scripts/lib/process.mjs'
 import { clearBinaryCache } from '../../scripts/lib/opencode.mjs'
 
@@ -28,13 +29,18 @@ async function sandbox(extra = {}) {
   return { env, cwd: home }
 }
 
+async function configuredSandbox(extra = {}) {
+  const s = await sandbox(extra)
+  await writeFile(join(s.env.XDG_DATA_HOME, 'opencode', 'auth.json'), '{"openrouter":{"type":"api","key":"k"}}')
+  await writeFile(join(s.env.XDG_CONFIG_HOME, 'opencode', 'opencode.jsonc'), '{"model":"openrouter/x"}')
+  return s
+}
+
 const bindFailure = (detail) => /EACCES|EPERM|EADDRNOTAVAIL|loopback|listen/i.test(String(detail))
 
 test('a fully configured environment reports ok and cleans up its probe broker', async (t) => {
   clearBinaryCache()
-  const s = await sandbox()
-  await writeFile(join(s.env.XDG_DATA_HOME, 'opencode', 'auth.json'), '{"openrouter":{"type":"api","key":"k"}}')
-  await writeFile(join(s.env.XDG_CONFIG_HOME, 'opencode', 'opencode.jsonc'), '{"model":"openrouter/x"}')
+  const s = await configuredSandbox()
   const r = await runDoctor({ env: s.env, cwd: s.cwd })
   if (!r.server.ok && bindFailure(r.server.detail)) {
     t.skip(`loopback binding is unavailable in this sandbox: ${r.server.detail}`)
@@ -44,6 +50,8 @@ test('a fully configured environment reports ok and cleans up its probe broker',
   assert.equal(r.ok, true, JSON.stringify(r.gaps))
   assert.equal(r.binary.source, 'env')
   assert.equal(r.model.source, 'global')
+  assert.deepEqual(r.server.broker.refcount, { remaining: 0, shutdown: true, released: true })
+  assert.match(r.server.detail, /doctor released its broker reference and stopped the broker/)
   for (const key of ['binary', 'version', 'auth', 'model', 'server']) {
     assert.equal(typeof r[key].detail, 'string', `${key} detail`)
   }
@@ -57,20 +65,23 @@ test('a failed broker probe leaves no endpoint behind', async () => {
   const r = await runDoctor({ env: s.env, cwd: s.cwd })
   assert.equal(r.server.ok, false)
   assert.match(r.server.detail, /would not start|EADDRINUSE/)
+  assert.deepEqual(r.server.broker.refcount, { remaining: 0, shutdown: true, released: true })
   assert.equal(await readEndpoint(s.env), null)
 })
 
-test('doctor does not stop a broker that was already running', async (t) => {
+test('doctor releases its reference but does not stop a broker held by another session', async (t) => {
   clearBinaryCache()
-  const s = await sandbox()
-  await writeFile(join(s.env.XDG_DATA_HOME, 'opencode', 'auth.json'), '{"openrouter":{"type":"api","key":"k"}}')
-  await writeFile(join(s.env.XDG_CONFIG_HOME, 'opencode', 'opencode.jsonc'), '{"model":"openrouter/x"}')
+  const s = await configuredSandbox()
+  await mkdir(sessionsDir(s.env), { recursive: true })
+  await writeFile(join(sessionsDir(s.env), 'other-session.json'), '{}')
+  await addRef('other-session', s.env, 'other-holder')
   let broker
   try {
     broker = await ensureBroker({ env: s.env })
   } catch (error) {
     if (bindFailure(error)) {
       t.skip(`loopback binding is unavailable in this sandbox: ${error.message}`)
+      await releaseRef('other-session', s.env, 'other-holder')
       return
     }
     throw error
@@ -85,32 +96,132 @@ test('doctor does not stop a broker that was already running', async (t) => {
     }
     const after = await readEndpoint(s.env)
     assert.equal(r.server.ok, true, JSON.stringify(r.gaps))
-    assert.equal(r.server.broker.disposition, 'pre-existing')
+    assert.deepEqual(r.server.broker.refcount, { remaining: 1, shutdown: false, released: true })
+    assert.match(r.server.detail, /broker remains running because 1 other session reference remains/)
     assert.equal(after.pid, before.pid)
     assert.equal(isAlive(before.pid), true)
   } finally {
+    await releaseRef('other-session', s.env, 'other-holder')
     await shutdownBroker(s.env)
   }
 })
 
-test('a shutdown failure is reported with the broker location', async () => {
+test('doctor uses plural wording for multiple remaining session references', async () => {
   clearBinaryCache()
-  const s = await sandbox()
+  const s = await configuredSandbox()
   const location = 'http://127.0.0.1:45678'
   const r = await runDoctor({
     env: s.env,
     cwd: s.cwd,
+    addRefFn: async () => {},
+    inspectBrokerFn: async () => ({ state: 'running', baseUrl: location }),
     ensureBrokerFn: async () => ({ baseUrl: location }),
-    shutdownBrokerFn: async () => {
+    releaseRefFn: async () => ({ remaining: 2, shutdown: false, released: true }),
+  })
+
+  assert.equal(r.server.ok, true, JSON.stringify(r.gaps))
+  assert.equal(r.server.broker.shutdown, 'not attempted (2 other session references remain)')
+  assert.match(r.server.detail, /broker remains running because 2 other session references remain/)
+})
+
+test('doctor stops the broker when its reference is the only holder', async () => {
+  clearBinaryCache()
+  const s = await configuredSandbox()
+  const calls = []
+  const location = 'http://127.0.0.1:45678'
+  const r = await runDoctor({
+    env: s.env,
+    cwd: s.cwd,
+    addRefFn: async (identity) => { calls.push(['add', identity]) },
+    inspectBrokerFn: async () => ({ state: 'absent' }),
+    ensureBrokerFn: async () => ({ baseUrl: location }),
+    releaseRefFn: async (identity) => {
+      calls.push(['release', identity])
+      return { remaining: 0, shutdown: true, released: true }
+    },
+  })
+  assert.equal(r.server.ok, true, JSON.stringify(r.gaps))
+  assert.deepEqual(r.server.broker.refcount, { remaining: 0, shutdown: true, released: true })
+  assert.equal(calls.length, 2)
+  assert.equal(calls[0][0], 'add')
+  assert.deepEqual(calls[1], ['release', calls[0][1]])
+  assert.match(r.server.detail, /stopped the broker/)
+})
+
+test('doctor releases its reference when the broker probe fails', async () => {
+  clearBinaryCache()
+  const s = await configuredSandbox()
+  let released = false
+  const r = await runDoctor({
+    env: s.env,
+    cwd: s.cwd,
+    addRefFn: async () => {},
+    inspectBrokerFn: async () => ({ state: 'absent' }),
+    ensureBrokerFn: async () => { throw new Error('probe failed') },
+    releaseRefFn: async () => {
+      released = true
+      return { remaining: 0, shutdown: true, released: true }
+    },
+  })
+  assert.equal(released, true)
+  assert.equal(r.server.ok, false)
+  assert.deepEqual(r.server.broker.refcount, { remaining: 0, shutdown: true, released: true })
+})
+
+test('doctor releases its reference when an exception is thrown mid-check', async () => {
+  clearBinaryCache()
+  const s = await configuredSandbox()
+  let released = false
+  const r = await runDoctor({
+    env: s.env,
+    cwd: s.cwd,
+    addRefFn: async () => {},
+    inspectBrokerFn: async () => { throw new Error('inspection exploded') },
+    releaseRefFn: async () => {
+      released = true
+      return { remaining: 0, shutdown: true, released: true }
+    },
+  })
+  assert.equal(released, true)
+  assert.equal(r.server.ok, false)
+  assert.match(r.server.detail, /inspection exploded/)
+  assert.match(r.server.detail, /re-inspect|stopped the broker/)
+})
+
+test('a failed release is reported with the broker location', async () => {
+  clearBinaryCache()
+  const s = await configuredSandbox()
+  const location = 'http://127.0.0.1:45678'
+  const r = await runDoctor({
+    env: s.env,
+    cwd: s.cwd,
+    addRefFn: async () => {},
+    inspectBrokerFn: async () => ({ state: 'absent' }),
+    ensureBrokerFn: async () => ({ baseUrl: location }),
+    releaseRefFn: async () => {
       throw new Error('timed out waiting for the opencode broker lock')
     },
   })
   assert.equal(r.ok, false)
   assert.equal(r.server.ok, false)
-  assert.match(r.server.detail, /could not shut down the broker/)
+  assert.match(r.server.detail, /could not release doctor's broker reference/)
   assert.match(r.server.detail, /may still be running/)
   assert.match(r.server.detail, new RegExp(location.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   assert.equal(r.server.broker.shutdown.ok, false)
+})
+
+test('an unexpected pre-server helper exception still returns a report', async () => {
+  clearBinaryCache()
+  const s = await sandbox()
+  const r = await runDoctor({
+    env: s.env,
+    cwd: s.cwd,
+    listProvidersFn: async () => { throw new Error('credentials could not be read') },
+  })
+  assert.equal(typeof r, 'object')
+  assert.equal(r.ok, false)
+  assert.match(r.auth.detail, /credentials could not be read/)
+  assert.equal(r.server.detail, 'not checked')
 })
 
 test('a missing binary short-circuits every later check', async () => {
