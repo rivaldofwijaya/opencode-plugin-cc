@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { chmod, readdir, unlink } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
-import { spawnDetached, terminate, isAlive } from './process.mjs'
+import { spawnDetached, terminate, isAlive, run } from './process.mjs'
 import { OpencodeClient } from './server.mjs'
 import { readJson, writeJson, sessionsDir } from './state.mjs'
 import {
@@ -283,6 +283,7 @@ async function writeRefs(refs, env) {
 }
 
 const localHolderTokens = new Map()
+const SESSION_OWNER_LOOKUP_TIMEOUT_MS = 100
 
 function localHolderKey(env, ccSessionId) {
   return `${refsPath(env)}\u0000${ccSessionId}`
@@ -302,6 +303,41 @@ function forgetLocalHolder(env, ccSessionId, holderToken) {
   const remaining = tokens.filter((token) => token !== holderToken)
   if (remaining.length) localHolderTokens.set(key, remaining)
   else localHolderTokens.delete(key)
+}
+
+function isClaudeProcess(command) {
+  return /(?:^|[\s/])claude(?:[-\s]|$)/i.test(String(command ?? ''))
+}
+
+async function sessionOwnerPid(env) {
+  const configured = Number(env.CLAUDE_CODE_SESSION_PID)
+  if (Number.isInteger(configured) && configured > 0) return configured
+
+  let current = process.ppid
+  let candidate = current
+  const seen = new Set()
+  for (let depth = 0; depth < 12 && Number.isInteger(current) && current > 0; depth += 1) {
+    if (seen.has(current)) break
+    seen.add(current)
+    let result
+    try {
+      result = await run('ps', ['-p', String(current), '-o', 'pid=,ppid=,command='], {
+        env,
+        timeoutMs: SESSION_OWNER_LOOKUP_TIMEOUT_MS,
+      })
+    } catch {
+      break
+    }
+    const match = result.stdout.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/)
+    if (!match) break
+    const pid = Number(match[1])
+    const parentPid = Number(match[2])
+    if (isClaudeProcess(match[3])) return pid
+    if (parentPid <= 1 || parentPid === pid) break
+    candidate = parentPid
+    current = parentPid
+  }
+  return candidate
 }
 
 function legacyHolderToken(ccSessionId, at) {
@@ -325,10 +361,15 @@ function normalizeRefs(raw) {
     for (const [holderToken, holder] of Object.entries(value)) {
       if (!holder || typeof holder !== 'object' || Array.isArray(holder)) continue
       if (!Number.isFinite(holder.at)) continue
-      holders[holderToken] = {
+      const normalized = {
         pid: Number.isInteger(holder.pid) ? holder.pid : null,
         at: holder.at,
       }
+      if (holder.scope === 'session') {
+        normalized.scope = 'session'
+        normalized.sessionPid = Number.isInteger(holder.sessionPid) ? holder.sessionPid : null
+      }
+      holders[holderToken] = normalized
     }
     if (Object.keys(holders).length) refs[ccSessionId] = holders
   }
@@ -338,7 +379,11 @@ function normalizeRefs(raw) {
 function pruneDeadHolders(refs) {
   for (const [ccSessionId, holders] of Object.entries(refs)) {
     for (const [holderToken, holder] of Object.entries(holders)) {
-      if (Number.isInteger(holder.pid) && !isAlive(holder.pid)) delete holders[holderToken]
+      const ownerPid = holder.scope === 'session' ? holder.sessionPid : holder.pid
+      const fallbackPid = holder.scope === 'session' && !Number.isInteger(ownerPid)
+        ? holder.pid
+        : ownerPid
+      if (Number.isInteger(fallbackPid) && !isAlive(fallbackPid)) delete holders[holderToken]
     }
     if (!Object.keys(holders).length) delete refs[ccSessionId]
   }
@@ -349,13 +394,15 @@ function pruneUnknownSessions(refs, known) {
   for (const [ccSessionId, holders] of Object.entries(refs)) {
     if (known.has(ccSessionId)) continue
 
-    // A live process can own a non-session holder (for example doctor's
-    // probe reference), so registry absence alone is not stale evidence.
-    // pruneDeadHolders already removed holders whose recorded PID is dead;
-    // pid-less legacy holders remain reclaimable here. Filter per holder so a
-    // live non-session holder cannot shelter a dead or legacy sibling.
+    // A session holder is live only while its session remains registered;
+    // unregistering is the durable SessionEnd proof and removes that holder.
+    // A live process can own a non-session holder (for example doctor's probe
+    // reference), so registry absence alone is not stale evidence for those.
+    // Filter per holder so a live non-session holder cannot shelter a dead or
+    // legacy sibling.
     for (const [holderToken, holder] of Object.entries(holders)) {
-      if (!Number.isInteger(holder.pid) || !isAlive(holder.pid)) delete holders[holderToken]
+      if (holder.scope === 'session') delete holders[holderToken]
+      else if (!Number.isInteger(holder.pid) || !isAlive(holder.pid)) delete holders[holderToken]
     }
     if (!Object.keys(holders).length) delete refs[ccSessionId]
   }
@@ -428,7 +475,7 @@ async function knownSessions(env) {
 
 // Counts returned by addRef/releaseRef are live holder records, not sessions.
 // A single Claude Code session can therefore contribute several references.
-export async function addRef(ccSessionId, env = process.env, holderToken) {
+export async function addRef(ccSessionId, env = process.env, holderToken, options = {}) {
   return await withLock(env, async () => {
     const next = pruneDeadHolders(normalizeRefs(await readJson(refsPath(env), {})))
     const token = typeof holderToken === 'string' && holderToken
@@ -436,11 +483,27 @@ export async function addRef(ccSessionId, env = process.env, holderToken) {
       : randomBytes(24).toString('hex')
     const holders = next[ccSessionId] ?? {}
     if (holders[token]) throw new Error(`broker holder token is already in use: ${token}`)
-    holders[token] = { pid: process.pid, at: Date.now() }
+    const holder = { pid: process.pid, at: Date.now() }
+    if (options.scope === 'session') {
+      holder.scope = 'session'
+      holder.sessionPid = Number.isInteger(options.sessionPid) ? options.sessionPid : process.ppid
+    }
+    holders[token] = holder
     next[ccSessionId] = holders
     await writeRefs(next, env)
     rememberLocalHolder(env, ccSessionId, token)
     return holderCount(next)
+  })
+}
+
+export async function addSessionRef(ccSessionId, env = process.env, holderToken) {
+  // The hook process is intentionally short-lived. Keep the Claude ancestor
+  // as the liveness witness; a crashed Claude process therefore becomes
+  // reclaimable even when it never emitted SessionEnd.
+  const sessionPid = await sessionOwnerPid(env)
+  return addRef(ccSessionId, env, holderToken, {
+    scope: 'session',
+    sessionPid,
   })
 }
 

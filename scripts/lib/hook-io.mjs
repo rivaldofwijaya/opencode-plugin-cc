@@ -1,9 +1,11 @@
+import { spawn } from 'node:child_process'
 import { appendFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { stateRoot } from './state.mjs'
 
 const DEFAULT_PAYLOAD_TIMEOUT_MS = 1_000
 const MAX_PAYLOAD_BYTES = 1_024 * 1_024
+export const HOOK_FAILURE_LOG_TIMEOUT_MS = 250
 
 function objectPayload(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -114,4 +116,52 @@ export async function logHookFailure({ hook, event, error, env = process.env }) 
       // The hook still has to return the approved best-effort exit code.
     }
   }
+}
+
+export async function logHookFailureBounded(args, timeoutMs = HOOK_FAILURE_LOG_TIMEOUT_MS) {
+  const payload = JSON.stringify({
+    hook: args.hook,
+    event: args.event,
+    error: errorMessage(args.error),
+    env: args.env ?? process.env,
+  })
+  const childScript = [
+    `import { logHookFailure } from ${JSON.stringify(import.meta.url)}`,
+    'await logHookFailure(JSON.parse(process.env.OPENCODE_HOOK_LOG_ARGS))',
+  ].join('\n')
+
+  await new Promise((resolve) => {
+    let settled = false
+    let timer
+    const finish = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve()
+    }
+
+    let child
+    try {
+      child = spawn(process.execPath, ['--input-type=module', '-e', childScript], {
+        env: {
+          ...process.env,
+          ...(args.env ?? {}),
+          OPENCODE_HOOK_LOG_ARGS: payload,
+        },
+        stdio: 'ignore',
+      })
+      child.once('error', finish)
+      child.once('close', finish)
+      timer = setTimeout(() => {
+        try {
+          child.kill('SIGKILL')
+        } catch {
+          // The child may have exited between the timer and the signal.
+        }
+        finish()
+      }, Math.max(0, timeoutMs))
+    } catch {
+      finish()
+    }
+  })
 }
