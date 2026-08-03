@@ -50,6 +50,33 @@ export async function configTargetPath({ scope, env = process.env, cwd = process
   return candidates[0]
 }
 
+export function validateModel(model) {
+  let value
+  try {
+    value = String(model ?? '')
+  } catch {
+    const error = new Error('invalid model value; expected provider/model form')
+    error.code = 'INVALID_MODEL'
+    throw error
+  }
+
+  let problem
+  if (value.length === 0) problem = 'it is empty'
+  else if (!value.trim()) problem = 'it contains only whitespace'
+  else if (!value.includes('/')) problem = 'it is missing the provider/model slash'
+  else if (value.startsWith('/')) problem = 'it has a leading slash'
+  else if (value.endsWith('/')) problem = 'it has a trailing slash'
+  else if (value.includes('//')) problem = 'it has consecutive slashes'
+  else if (/\s/.test(value)) problem = 'it contains whitespace'
+
+  if (problem) {
+    const error = new Error(`invalid model ${JSON.stringify(value)}: ${problem}; expected provider/model form`)
+    error.code = 'INVALID_MODEL'
+    throw error
+  }
+  return value
+}
+
 async function containsComments(path) {
   try {
     const raw = await readFile(path, 'utf8')
@@ -61,14 +88,12 @@ async function containsComments(path) {
 }
 
 export async function setModel({ model, scope, env = process.env, cwd = process.cwd() }) {
-  if (!model || !String(model).includes('/')) {
-    throw new Error(`model must be in provider/model form, got: ${model}`)
-  }
+  const modelText = validateModel(model)
   const path = await configTargetPath({ scope, env, cwd })
   const commentsDropped = await containsComments(path)
   const { backup, created } = await mergeWriteJson(
     path,
-    { model },
+    { model: modelText },
     { schemaUrl: CONFIG_SCHEMA_URL },
   )
   return { path, backup, created, commentsDropped }
