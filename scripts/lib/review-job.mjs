@@ -13,6 +13,10 @@ export const REVIEW_TOOLS = {
   edit: false, write: false, patch: false, bash: false, webfetch: false,
 }
 
+function neutralizePromptDelimiters(value) {
+  return String(value).replaceAll('<', '＜').replaceAll('>', '＞')
+}
+
 export async function prepareReview({ cwd, scope = 'auto', base, adversarial = false, focus = '' }) {
   const root = await repoRoot(cwd).catch(() => { throw new CompanionError(`not a git repository: ${cwd}`) })
   const resolved = await resolveScope({ cwd: root, scope, base })
@@ -27,13 +31,17 @@ export async function prepareReview({ cwd, scope = 'auto', base, adversarial = f
   const openDelimiter = `<change-${nonce}>`
   const closeDelimiter = `</change-${nonce}>`
   const vars = {
-    CWD: root,
-    SCOPE: resolved.scope,
-    BASE_NOTE: resolved.base ? ` (against ${resolved.base})` : '',
+    CWD: neutralizePromptDelimiters(root),
+    SCOPE: neutralizePromptDelimiters(resolved.scope),
+    BASE_NOTE: neutralizePromptDelimiters(resolved.base ? ` (against ${resolved.base})` : ''),
     DIFF: `${openDelimiter}\n${diff.text}\n${closeDelimiter}`,
   }
+  const focusText = typeof focus === 'string' ? focus.trim() : String(focus ?? '').trim()
   const prompt = adversarial
-    ? await loadPrompt('adversarial-review', { ...vars, FOCUS: focus.trim() || '(none given)' })
+    ? await loadPrompt('adversarial-review', {
+      ...vars,
+      FOCUS: neutralizePromptDelimiters(focusText || '(none given)'),
+    })
     : await loadPrompt('review', vars)
   return { prompt, root, scope: resolved.scope, base: resolved.base, size, truncated: diff.truncated }
 }

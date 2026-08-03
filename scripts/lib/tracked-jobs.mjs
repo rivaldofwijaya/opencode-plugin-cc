@@ -13,8 +13,12 @@ import {
 } from './state.mjs'
 import { atomicWrite } from './fs.mjs'
 import { isAlive } from './process.mjs'
+import { acquireLock, releaseLock } from './broker-endpoint.mjs'
 
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+const RECORD_LOCK_TIMEOUT_MS = 20_000
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 export function newJobId() {
   return `job_${Date.now().toString(36)}${randomBytes(3).toString('hex')}`
@@ -62,18 +66,40 @@ export const readJob = (jobId, env = process.env) => (
   readJson(join(jobDir(jobId, env), 'meta.json'), null)
 )
 
-export async function updateJob(jobId, patch, env = process.env) {
-  const current = await readJob(jobId, env)
-  if (!current) throw new Error(`unknown job: ${jobId}`)
-  const next = { ...current, ...patch }
-  await writeJson(join(jobDir(jobId, env), 'meta.json'), next)
-  return next
+async function withRecordLock(env, callback) {
+  const deadline = Date.now() + RECORD_LOCK_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    if (await acquireLock(env)) {
+      try {
+        return await callback()
+      } finally {
+        await releaseLock(env)
+      }
+    }
+    await sleep(10)
+  }
+  throw new Error('timed out waiting for the opencode broker lock')
 }
 
-export async function updateJobMeta(jobId, patch, env = process.env) {
-  const current = await readJob(jobId, env)
-  if (!current) throw new Error(`unknown job: ${jobId}`)
-  return updateJob(jobId, { meta: { ...(current.meta ?? {}), ...patch } }, env)
+async function mutateJob(jobId, mutation, env) {
+  return withRecordLock(env, async () => {
+    const current = await readJob(jobId, env)
+    if (!current) throw new Error(`unknown job: ${jobId}`)
+    const next = mutation(current)
+    await writeJson(join(jobDir(jobId, env), 'meta.json'), next)
+    return next
+  })
+}
+
+export function updateJob(jobId, patch, env = process.env) {
+  return mutateJob(jobId, current => ({ ...current, ...patch }), env)
+}
+
+export function updateJobMeta(jobId, patch, env = process.env) {
+  return mutateJob(jobId, current => ({
+    ...current,
+    meta: { ...(current.meta ?? {}), ...patch },
+  }), env)
 }
 
 export async function listJobs(ccSessionId, env = process.env) {
