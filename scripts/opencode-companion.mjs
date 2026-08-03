@@ -36,7 +36,7 @@ import {
 } from './lib/review-job.mjs'
 import { startJob, runForeground, cancelJob, cancelAll } from './lib/job-control.mjs'
 import { resolveScope, sizeChange, repoRoot } from './lib/git.mjs'
-import { renderJobList, renderJobResult } from './lib/render.mjs'
+import { formatJobStart, renderJobList, renderJobResult } from './lib/render.mjs'
 
 // Exit-code contract: 0 is success, 1 is a reported gap (doctor's approved
 // R12.4 JSON-on-stdout exemption), 2 is an invalid invocation, and 3 is an
@@ -514,10 +514,11 @@ const handlers = {
     }
 
     const outcome = await cancelJob(jobId, env)
-    const started = jobStartDescription(job)
+    const current = await readJob(jobId, env) ?? job
+    const started = jobStartDescription(current)
     const message = outcome === 'cancelled'
       ? `Cancelled ${job.verb} ${jobId}; state is cancelled${started}.`
-      : `${job.verb} ${jobId} had already finished (state: ${job.state}${started}); nothing to cancel.`
+      : `${job.verb} ${jobId} had already finished (state: ${current.state}${started}); nothing to cancel.`
     return { stdout: message, exitCode: EXIT_CODES.SUCCESS }
   },
 }
@@ -734,8 +735,8 @@ function errorDetail(error) {
 }
 
 function jobStartDescription(job) {
-  if (!Number.isFinite(job?.startedAt) || job.startedAt <= 0) return ''
-  return ` (started ${new Date(job.startedAt).toISOString()})`
+  const started = formatJobStart(job)
+  return started ? ` (${started})` : ''
 }
 
 function ensurePersistedSessionPath({ env, ccSessionId }) {

@@ -392,6 +392,27 @@ test('cancelJob on an unknown id reports unknown', async () => {
   assert.equal(await cancelJob('job_nope', env), 'unknown')
 })
 
+test('cancelJob does not abort an unowned session', async () => {
+  const env = await sandbox()
+  const job = await createJob({
+    ccSessionId: 'cc-unowned-session',
+    verb: 'task',
+    cwd: repoCwd,
+    background: true,
+  }, env)
+  await updateJob(job.id, { sessionID: 'session-owned-elsewhere' }, env)
+  const aborted = []
+  const ensureBrokerFn = async () => ({
+    client: {
+      abort: async (sessionID) => { aborted.push(sessionID) },
+    },
+  })
+
+  assert.equal(await cancelJob(job.id, env, { ensureBrokerFn }), 'cancelled')
+  assert.deepEqual(aborted, [])
+  assert.equal((await readJob(job.id, env)).state, 'cancelled')
+})
+
 test('an SSE disconnect mid-job reconnects and reaches a terminal state', async (t) => {
   const env = await sandbox({ FAKE_OPENCODE_FAULT: 'sse-disconnect' })
   let job
