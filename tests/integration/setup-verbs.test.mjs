@@ -55,10 +55,29 @@ test('set-key preserves an existing provider', async () => {
 
 test('set-key without a key reports invalid invocation with a clear message', async () => {
   const s = await sandbox()
+  const dataHome = s.env.XDG_DATA_HOME
+  const dataDir = join(dataHome, 'opencode')
+  const auth = join(dataDir, 'auth.json')
+  const backup = `${auth}.bak`
   const r = await cli(s.env, ['set-key', '--provider', 'openrouter'])
   assert.equal(r.code, 2)
   assert.equal(r.stderr.trim(), 'set-key requires --key <API_KEY>')
   assert.equal(r.stdout, '')
+  await assert.rejects(() => stat(dataHome), { code: 'ENOENT' })
+  await assert.rejects(() => stat(dataDir), { code: 'ENOENT' })
+  await assert.rejects(() => stat(auth), { code: 'ENOENT' })
+  await assert.rejects(() => stat(backup), { code: 'ENOENT' })
+
+  const valid = await sandbox()
+  const accepted = await cli(valid.env, [
+    'set-key', '--provider', 'openrouter', '--key', 'sk-or-valid-control',
+  ])
+  assert.equal(accepted.code, 0)
+  assert.equal(
+    JSON.parse(await readFile(join(valid.env.XDG_DATA_HOME, 'opencode', 'auth.json')))
+      .openrouter.key,
+    'sk-or-valid-control',
+  )
 })
 
 test('set-key reports a sanitized underlying filesystem error code', async () => {
@@ -175,30 +194,86 @@ test('models lists what the binary reports and filters by provider', async () =>
 })
 
 test('models reports binary failures on stderr with a non-zero exit', async () => {
-  const s = await sandbox({ FAKE_OPENCODE_FAULT: 'nonzero-exit' })
+  const s = await sandbox({
+    FAKE_OPENCODE_FAULT: 'nonzero-exit',
+    FAKE_OPENCODE_MODELS: 'stale/model',
+  })
   const r = await cli(s.env, ['models'])
   assert.equal(r.code, 1)
   assert.match(r.stderr, /opencode models failed for .*fake opencode failed/i)
   assert.equal(r.stdout, '')
+
+  let invocation
+  await assert.rejects(
+    () => handlers.models({
+      flags: {},
+      env: s.env,
+      resolveBinaryFn: async () => ({ path: fixture }),
+      runFn: async (...args) => {
+        invocation = args
+        return run(...args)
+      },
+    }),
+    error => {
+      assert.equal(error.exitCode, 1)
+      assert.match(error.message, /opencode models failed for .*fake opencode failed/i)
+      return true
+    },
+  )
+  assert.ok(invocation)
+  assert.equal(invocation[0], fixture)
+  assert.deepEqual(invocation[1], ['models'])
+  assert.equal(invocation[2].env, s.env)
 })
 
 test('models reports a missing binary as a gap', async () => {
-  const s = await sandbox({ OPENCODE_BIN: '/nonexistent/opencode', PATH: '/nonexistent' })
+  const s = await sandbox({
+    OPENCODE_BIN: '/nonexistent/opencode',
+    PATH: '/nonexistent',
+    FAKE_OPENCODE_MODELS: 'stale/model',
+  })
   const r = await cli(s.env, ['models'])
   assert.equal(r.code, 1)
   assert.match(r.stderr, /opencode binary unavailable: opencode binary not found/i)
   assert.equal(r.stdout, '')
+
+  let resolutionRequest
+  await assert.rejects(
+    () => handlers.models({
+      flags: {},
+      env: s.env,
+      resolveBinaryFn: async request => {
+        resolutionRequest = request
+        throw new Error('opencode binary not found')
+      },
+    }),
+    error => {
+      assert.equal(error.exitCode, 1)
+      assert.match(error.message, /opencode binary unavailable: opencode binary not found/i)
+      return true
+    },
+  )
+  assert.ok(resolutionRequest)
+  assert.equal(resolutionRequest.env, s.env)
 })
 
 test('models maps a spawn failure to a reported gap', async () => {
   const s = await sandbox()
   const spawnError = Object.assign(new Error('permission denied'), { code: 'EACCES' })
+  let resolutionRequest
+  let invocation
   await assert.rejects(
     () => handlers.models({
       flags: {},
       env: s.env,
-      resolveBinaryFn: async () => ({ path: '/tmp/unusable-opencode' }),
-      runFn: async () => { throw spawnError },
+      resolveBinaryFn: async request => {
+        resolutionRequest = request
+        return { path: '/tmp/unusable-opencode' }
+      },
+      runFn: async (...args) => {
+        invocation = args
+        throw spawnError
+      },
     }),
     error => {
       assert.equal(error.exitCode, 1)
@@ -206,6 +281,12 @@ test('models maps a spawn failure to a reported gap', async () => {
       return true
     },
   )
+  assert.ok(resolutionRequest)
+  assert.equal(resolutionRequest.env, s.env)
+  assert.ok(invocation)
+  assert.equal(invocation[0], '/tmp/unusable-opencode')
+  assert.deepEqual(invocation[1], ['models'])
+  assert.equal(invocation[2].env, s.env)
 })
 
 test('models explains empty and unmatched results', async () => {
