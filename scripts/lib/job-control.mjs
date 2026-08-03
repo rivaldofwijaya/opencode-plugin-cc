@@ -355,6 +355,7 @@ export async function startJob({
   resumeSessionID,
   meta,
   background = true,
+  onBrokerRefAcquired,
   env = process.env,
 }) {
   const job = await createJob({
@@ -377,6 +378,7 @@ export async function startJob({
   }
   try {
     releaseBrokerRef = await holdBrokerRef(ccSessionId, env)
+    onBrokerRefAcquired?.(releaseBrokerRef)
     const broker = await ensureBroker({ env })
     const sessionID = resumeSessionID
       ?? (await broker.client.createSession({
@@ -409,6 +411,7 @@ export async function startJob({
         jobId: job.id,
         sessionID,
         done: new LazyJobPromise(() => waitForJob(job.id, env)),
+        release: () => releaseBrokerRef?.(),
       }
     }
 
@@ -421,7 +424,7 @@ export async function startJob({
       () => foregroundJobIds.delete(job.id),
     )
     await execution.promptStarted
-    return { jobId: job.id, sessionID, done: execution.done }
+    return { jobId: job.id, sessionID, done: execution.done, release: () => releaseBrokerRef?.() }
   } catch (error) {
     foregroundJobIds.delete(job.id)
     if (!executionOwnsRef && (!workerOwnsRef || !launcherRefReleased)) await releaseLauncherRef()
