@@ -34,24 +34,43 @@ const handlers = {
     return { stdout, exitCode: report.ok ? EXIT_CODES.SUCCESS : EXIT_CODES.GAP }
   },
 
-  'set-key': async ({ flags, env, cwd }) => {
-    if (!flags.provider || flags.provider === true) throw new CompanionError('set-key requires --provider <name>')
-    if (!flags.key || flags.key === true) throw new CompanionError('set-key requires --key <API_KEY>')
+  'set-key': async ({ flags, env, cwd, runDoctorFn, renderDoctorFn }) => {
+    if (flags.provider === undefined || flags.provider === true) {
+      throw new CompanionError('set-key requires --provider <name>', EXIT_CODES.INVALID_INVOCATION)
+    }
+    if (flags.key === undefined || flags.key === true) {
+      throw new CompanionError('set-key requires --key <API_KEY>', EXIT_CODES.INVALID_INVOCATION)
+    }
+    if (typeof flags.provider === 'string' && !flags.provider.trim()) {
+      throw new CompanionError('set-key requires a non-empty --provider', EXIT_CODES.INVALID_INVOCATION)
+    }
+    if (typeof flags.key === 'string' && !flags.key.trim()) {
+      throw new CompanionError('set-key requires a non-empty --key', EXIT_CODES.INVALID_INVOCATION)
+    }
     let res
     try {
       res = await setKey({ provider: flags.provider, key: String(flags.key), env })
     } catch (error) {
-      throw new CompanionError(error.message)
+      throw new CompanionError(error.message, EXIT_CODES.GAP)
     }
     const lines = [`Stored a key for ${res.provider} (${res.redacted}) in ${res.path}.`]
     if (res.backup) lines.push(`Backed up the previous file to ${res.backup}.`)
-    const report = await runDoctor({ env, cwd, checkServer: false })
-    lines.push('', renderDoctor(report))
-    return { stdout: lines.join('\n'), exitCode: EXIT_CODES.SUCCESS }
+    const postWrite = await appendPostWriteDoctor(lines, {
+      env,
+      cwd,
+      runDoctorFn,
+      renderDoctorFn,
+    })
+    return {
+      stdout: lines.join('\n'),
+      exitCode: postWrite.failed ? EXIT_CODES.GAP : EXIT_CODES.SUCCESS,
+    }
   },
 
-  'set-model': async ({ flags, env, cwd }) => {
-    if (!flags.model || flags.model === true) throw new CompanionError('set-model requires --model <provider/model>')
+  'set-model': async ({ flags, env, cwd, runDoctorFn, renderDoctorFn }) => {
+    if (flags.model === undefined || flags.model === true) {
+      throw new CompanionError('set-model requires --model <provider/model>', EXIT_CODES.INVALID_INVOCATION)
+    }
     if (flags.scope !== undefined && flags.scope !== 'global' && flags.scope !== 'project') {
       throw new CompanionError('invalid invocation: set-model --scope must be global or project', EXIT_CODES.INVALID_INVOCATION)
     }
@@ -60,23 +79,61 @@ const handlers = {
     try {
       res = await setModel({ model: String(flags.model), scope, env, cwd })
     } catch (error) {
-      throw new CompanionError(error.message)
+      const exitCode = error?.code === 'INVALID_MODEL'
+        ? EXIT_CODES.INVALID_INVOCATION
+        : EXIT_CODES.GAP
+      throw new CompanionError(error.message, exitCode)
     }
     const lines = [`Set the default model to ${flags.model} in ${res.path} (${scope} scope).`]
     if (res.backup) lines.push(`Backed up the previous file to ${res.backup}.`)
     lines.push(`Comments were dropped: ${res.commentsDropped ? 'yes' : 'no'}.`)
-    const report = await runDoctor({ env, cwd, checkServer: false })
-    lines.push('', renderDoctor(report))
-    return { stdout: lines.join('\n'), exitCode: report.model.ok ? EXIT_CODES.SUCCESS : EXIT_CODES.GAP }
+    const postWrite = await appendPostWriteDoctor(lines, {
+      env,
+      cwd,
+      runDoctorFn,
+      renderDoctorFn,
+    })
+    return {
+      stdout: lines.join('\n'),
+      exitCode: postWrite.failed
+        ? EXIT_CODES.GAP
+        : (postWrite.report.model.ok ? EXIT_CODES.SUCCESS : EXIT_CODES.GAP),
+    }
   },
 
-  models: async ({ flags, env }) => {
-    const bin = await resolveBinary({ env })
-    const r = await run(bin.path, ['models'], { env, timeoutMs: 60000 })
-    if (r.code !== 0) throw new CompanionError(`opencode models failed:\n${r.stderr.trim()}`)
-    let lines = r.stdout.split('\n').map(line => line.trim()).filter(Boolean)
+  models: async ({ flags, env, resolveBinaryFn = resolveBinary, runFn = run }) => {
+    let bin
+    try {
+      bin = await resolveBinaryFn({ env })
+    } catch (error) {
+      if (!isBinaryFailure(error)) throw error
+      throw new CompanionError(`opencode binary unavailable: ${errorDetail(error)}`, EXIT_CODES.GAP)
+    }
+
+    let r
+    try {
+      r = await runFn(bin.path, ['models'], { env, timeoutMs: 60000 })
+    } catch (error) {
+      if (!isBinaryFailure(error)) throw error
+      throw new CompanionError(`opencode binary ${bin.path} could not be started: ${errorDetail(error)}`, EXIT_CODES.GAP)
+    }
+
+    if (r.code !== 0) {
+      const detail = r.stderr.trim() || (r.timedOut ? 'timed out' : `exited with code ${r.code ?? 'unknown'}`)
+      throw new CompanionError(`opencode models failed for ${bin.path}: ${detail}`, EXIT_CODES.GAP)
+    }
+
+    const allLines = r.stdout.split('\n').map(line => line.trim()).filter(Boolean)
+    if (allLines.length === 0) {
+      return { stdout: 'The opencode binary reported no models at all.', exitCode: EXIT_CODES.SUCCESS }
+    }
+
+    let lines = allLines
     if (flags.provider && flags.provider !== true) {
       lines = lines.filter(line => line.startsWith(`${flags.provider}/`))
+    }
+    if (lines.length === 0 && flags.provider && flags.provider !== true) {
+      return { stdout: `No models matched provider ${flags.provider}.`, exitCode: EXIT_CODES.SUCCESS }
     }
     return { stdout: lines.join('\n'), exitCode: EXIT_CODES.SUCCESS }
   },
@@ -160,6 +217,32 @@ export const COMMAND_SPECS = Object.freeze({
     maxPositionals: 0,
   },
 })
+
+function errorDetail(error) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+const BINARY_FAILURE_CODES = new Set(['EACCES', 'EISDIR', 'ENOENT', 'ENOTDIR', 'EPERM'])
+
+function isBinaryFailure(error) {
+  return BINARY_FAILURE_CODES.has(error?.code) || errorDetail(error) === 'opencode binary not found'
+}
+
+async function appendPostWriteDoctor(lines, {
+  env,
+  cwd,
+  runDoctorFn = runDoctor,
+  renderDoctorFn = renderDoctor,
+} = {}) {
+  try {
+    const report = await runDoctorFn({ env, cwd, checkServer: false })
+    lines.push('', renderDoctorFn(report))
+    return { report, failed: false }
+  } catch (error) {
+    lines.push('', `Post-write doctor check failed: ${errorDetail(error)}`)
+    return { report: null, failed: true }
+  }
+}
 
 function usage() {
   return [
