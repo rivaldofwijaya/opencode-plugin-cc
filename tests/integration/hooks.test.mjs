@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import { isAlive, run, spawnDetached, terminate } from '../../scripts/lib/process.mjs'
-import { createJob, readJob, updateJob } from '../../scripts/lib/tracked-jobs.mjs'
+import { createJob, listJobs, readJob, updateJob } from '../../scripts/lib/tracked-jobs.mjs'
 import { brokerDir, jobDir, readJson, writeJson } from '../../scripts/lib/state.mjs'
 import { refsPath, readEndpoint, writeEndpoint } from '../../scripts/lib/broker-endpoint.mjs'
 import { shutdownBroker } from '../../scripts/lib/broker-lifecycle.mjs'
@@ -135,6 +135,16 @@ test('SessionEnd unregisters only its session and preserves another session hold
   })
 })
 
+test('SessionEnd does not release a migrated holder it did not acquire', async () => {
+  const s = await sandbox()
+  const legacyAt = Date.now()
+  await writeJson(refsPath(s.env), { 'cc-legacy': legacyAt })
+
+  const r = await hook(lifecycle, ['SessionEnd'], s.env, { session_id: 'cc-legacy', cwd: s.repo })
+  assert.equal(r.code, 0, JSON.stringify(r))
+  assert.deepEqual(await readJson(refsPath(s.env), {}), { 'cc-legacy': legacyAt })
+})
+
 test('SessionEnd cancels this session running jobs', async (t) => {
   const s = await sandbox({ FAKE_OPENCODE_EVENT_DELAY_MS: '400' })
   const started = await run(process.execPath, [companion, 'task', '--background', '--', 'long'],
@@ -227,6 +237,32 @@ test('lifecycle failures exit 0 and are persisted in the state directory', async
   assert.equal(timed.code, 0, JSON.stringify(timed))
   assert.equal(timed.timedOut, false, 'hook wedged in failure logging')
   assert.ok(Date.now() - startedAt < 1000, 'bounded failure logging exceeded its budget')
+})
+
+test('lifecycle exits 0 when the failure logger rejects inside its own path', async () => {
+  const s = await sandbox({ OPENCODE_TEST_THROW_HOOK_FAILURE_LOGGING: '1' })
+  const startedAt = Date.now()
+  const r = await hook(lifecycle, ['unknown'], s.env, {}, { timeoutMs: 1000 })
+  assert.equal(r.code, 0, JSON.stringify(r))
+  assert.equal(r.timedOut, false, 'structural exit guard did not run')
+  assert.ok(Date.now() - startedAt < 900, 'failure-log construction exceeded the hook budget')
+})
+
+test('lifecycle hard watchdog exits 0 near its deadline when work never settles', async () => {
+  const s = await sandbox({ OPENCODE_TEST_HANG_LIFECYCLE_WORK: '1' })
+  const startedAt = Date.now()
+  const r = await hook(
+    lifecycle,
+    ['SessionStart'],
+    s.env,
+    { session_id: 'cc-watchdog', cwd: s.repo },
+    { timeoutMs: 1800 },
+  )
+  const elapsed = Date.now() - startedAt
+  assert.equal(r.code, 0, JSON.stringify(r))
+  assert.equal(r.timedOut, false, 'hard watchdog did not terminate the hook')
+  assert.ok(elapsed >= 1050, `watchdog fired too early: ${elapsed}ms`)
+  assert.ok(elapsed < 1450, `watchdog exceeded the 1.5s SessionEnd budget: ${elapsed}ms`)
 })
 
 test('the Stop gate is silent when it is off', async () => {
@@ -338,6 +374,106 @@ test('the Stop gate cancels a timed-out foreground review and releases its broke
   assert.equal(meta.state, 'cancelled')
   assert.deepEqual(await readJson(refsPath(s.env), {}), {})
   assert.equal(await readEndpoint(s.env), null)
+})
+
+test('concurrent Stop gates cancel only the review job each hook created', async (t) => {
+  const s = await sandbox()
+  const script = join(s.home, 'slow-gate.jsonl')
+  await writeFile(script, [
+    JSON.stringify({
+      type: 'session.next.text.delta',
+      properties: { delta: '{"findings":[]}' },
+    }),
+    JSON.stringify({ type: 'session.idle', properties: {} }),
+  ].join('\n') + '\n')
+  await run(process.execPath, [companion, 'gate', '--on'], { env: s.env })
+  await writeFile(join(s.repo, 'a.js'), 'let x = 8\n')
+
+  const first = hook(
+    gate,
+    [],
+    {
+      ...s.env,
+      CLAUDE_SESSION_ID: 'cc-concurrent',
+      OPENCODE_STOP_GATE_TIMEOUT_MS: '3000',
+      FAKE_OPENCODE_EVENT_DELAY_MS: '5000',
+      FAKE_OPENCODE_SCRIPT: script,
+    },
+    { session_id: 'cc-concurrent', cwd: s.repo },
+    { timeoutMs: 10000 },
+  )
+  const second = hook(
+    gate,
+    [],
+    {
+      ...s.env,
+      CLAUDE_SESSION_ID: 'cc-concurrent',
+      OPENCODE_STOP_GATE_TIMEOUT_MS: '7000',
+      FAKE_OPENCODE_EVENT_DELAY_MS: '5000',
+      FAKE_OPENCODE_SCRIPT: script,
+    },
+    { session_id: 'cc-concurrent', cwd: s.repo },
+    { timeoutMs: 10000 },
+  )
+  const results = await Promise.all([first, second])
+  for (const result of results) assert.equal(result.code, 0, JSON.stringify(result))
+
+  const errors = await readFile(join(s.env.XDG_STATE_HOME, 'opencode-plugin-cc', 'hook-errors.jsonl'), 'utf8').catch(() => '')
+  if (bindFailure(errors)) {
+    t.skip(`loopback binding is unavailable in this sandbox: ${errors}`)
+    return
+  }
+  const jobs = await listJobs('cc-concurrent', s.env)
+  assert.equal(jobs.length, 2)
+  assert.deepEqual(jobs.map(job => job.state).sort(), ['cancelled', 'done'])
+})
+
+test('concurrent Stop cleanup cancels only the job owned by the timed-out hook', async () => {
+  const s = await sandbox()
+  const firstJob = await createJob({
+    ccSessionId: 'cc-cleanup',
+    verb: 'gate',
+    cwd: s.repo,
+    background: true,
+  }, s.env)
+  const secondJob = await createJob({
+    ccSessionId: 'cc-cleanup',
+    verb: 'gate',
+    cwd: s.repo,
+    background: true,
+  }, s.env)
+
+  const first = hook(
+    gate,
+    [],
+    {
+      ...s.env,
+      CLAUDE_SESSION_ID: 'cc-cleanup',
+      OPENCODE_TEST_STOP_CLEANUP_SCENARIO: '1',
+      OPENCODE_TEST_STOP_JOB_ID: firstJob.id,
+      OPENCODE_TEST_STOP_JOB_ROLE: 'timeout',
+    },
+    { session_id: 'cc-cleanup', cwd: s.repo },
+    { timeoutMs: 2000 },
+  )
+  const second = hook(
+    gate,
+    [],
+    {
+      ...s.env,
+      CLAUDE_SESSION_ID: 'cc-cleanup',
+      OPENCODE_TEST_STOP_CLEANUP_SCENARIO: '1',
+      OPENCODE_TEST_STOP_JOB_ID: secondJob.id,
+      OPENCODE_TEST_STOP_JOB_ROLE: 'done',
+    },
+    { session_id: 'cc-cleanup', cwd: s.repo },
+    { timeoutMs: 2000 },
+  )
+  const results = await Promise.all([first, second])
+  for (const result of results) assert.equal(result.code, 0, JSON.stringify(result))
+
+  assert.equal((await readJob(firstJob.id, s.env)).state, 'cancelled')
+  assert.equal((await readJob(secondJob.id, s.env)).state, 'done')
 })
 
 test('the Stop gate handles malformed stdin without a stack trace', async () => {

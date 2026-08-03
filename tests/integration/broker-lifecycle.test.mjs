@@ -8,8 +8,10 @@ import { fileURLToPath } from 'node:url'
 import {
   ensureBroker,
   addRef,
+  addSessionRef,
   releaseRef,
   reapOrphans,
+  SESSION_HOLDER_MAX_AGE_MS,
   shutdownBroker,
 } from '../../scripts/lib/broker-lifecycle.mjs'
 import {
@@ -301,6 +303,93 @@ test('a no-op release leaves another live holder and the broker untouched', asyn
   })
 })
 
+test('repair never prunes a live non-session holder', async () => {
+  const env = await sandbox()
+  const live = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  const at = Date.now()
+  try {
+    await writeJson(refsPath(env), {
+      'cc-live-holder': { 'live-holder': { pid: live.pid, at } },
+    })
+
+    assert.deepEqual(await reapOrphans(env), { cleared: false })
+    assert.deepEqual(await readJson(refsPath(env), {}), {
+      'cc-live-holder': { 'live-holder': { pid: live.pid, at } },
+    })
+    assert.equal(isAlive(live.pid), true)
+  } finally {
+    if (isAlive(live.pid)) await terminate(live.pid, { graceMs: 1000 })
+  }
+})
+
+test('repair reclaims a session holder pinned to a live unrelated process', async () => {
+  const env = await sandbox()
+  const unrelated = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  try {
+    await writeJson(refsPath(env), {
+      'cc-crashed': {
+        'session-holder': {
+          pid: process.pid,
+          at: Date.now(),
+          scope: 'session',
+          sessionPid: unrelated.pid,
+          expiresAt: Date.now() + SESSION_HOLDER_MAX_AGE_MS,
+        },
+      },
+    })
+
+    assert.deepEqual(await reapOrphans(env), { cleared: true })
+    assert.deepEqual(await readJson(refsPath(env), {}), {})
+    assert.equal(isAlive(unrelated.pid), true)
+  } finally {
+    if (isAlive(unrelated.pid)) await terminate(unrelated.pid, { graceMs: 1000 })
+  }
+})
+
+test('repair reclaims an expired session holder without PID evidence', async () => {
+  const env = await sandbox()
+  const expiredAt = Date.now() - 1
+  await writeJson(refsPath(env), {
+    'cc-expired': {
+      'session-holder': {
+        pid: null,
+        at: expiredAt - SESSION_HOLDER_MAX_AGE_MS,
+        scope: 'session',
+        sessionPid: null,
+        expiresAt: expiredAt,
+      },
+    },
+  })
+
+  assert.deepEqual(await reapOrphans(env), { cleared: true })
+  assert.deepEqual(await readJson(refsPath(env), {}), {})
+})
+
+test('repair reclaims an expired migrated legacy holder', async () => {
+  const env = await sandbox()
+  await writeJson(refsPath(env), {
+    'cc-legacy-expired': Date.now() - SESSION_HOLDER_MAX_AGE_MS - 1,
+  })
+
+  assert.deepEqual(await reapOrphans(env), { cleared: true })
+  assert.deepEqual(await readJson(refsPath(env), {}), {})
+})
+
+test('session refs reject an unrelated configured PID and receive an expiry', async () => {
+  const env = await sandbox()
+  const unrelated = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  try {
+    env.CLAUDE_CODE_SESSION_PID = String(unrelated.pid)
+    await addSessionRef('cc-identity', env, 'session:cc-identity')
+    const holder = (await readJson(refsPath(env), {}))['cc-identity']['session:cc-identity']
+    assert.equal(holder.scope, 'session')
+    assert.notEqual(holder.sessionPid, unrelated.pid)
+    assert.equal(holder.expiresAt, holder.at + SESSION_HOLDER_MAX_AGE_MS)
+  } finally {
+    if (isAlive(unrelated.pid)) await terminate(unrelated.pid, { graceMs: 1000 })
+  }
+})
+
 test('old session timestamps migrate to independent holders without throwing', async () => {
   const env = await sandbox()
   await writeJson(refsPath(env), { legacy: 1 })
@@ -332,6 +421,22 @@ test('reapOrphans clears a portfile whose pid is dead', async () => {
   await writeEndpoint({ port: 1, pid: 2 ** 22, password: 'p', startedAt: 0 }, env)
   assert.deepEqual(await reapOrphans(env), { cleared: true })
   assert.equal(await readEndpoint(env), null)
+})
+
+test('reapOrphans repairs stale refs and stops a broker held only by them', async () => {
+  const env = await sandbox()
+  await withFakeOwnedBroker(env, async (broker) => {
+    const dead = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+    await terminate(dead.pid, { graceMs: 1000 })
+    await writeJson(refsPath(env), {
+      'cc-stale': { 'dead-holder': { pid: dead.pid, at: Date.now() } },
+    })
+
+    assert.deepEqual(await reapOrphans(env), { cleared: true })
+    assert.deepEqual(await readJson(refsPath(env), {}), {})
+    assert.equal(await readEndpoint(env), null)
+    assert.equal(isAlive(broker.pid), false)
+  })
 })
 
 test('the broker survives until the last ref is released', async (t) => {

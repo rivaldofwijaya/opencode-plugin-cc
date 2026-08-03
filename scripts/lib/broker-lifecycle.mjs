@@ -25,6 +25,8 @@ const brokerScript = fileURLToPath(new URL('../server-broker.mjs', import.meta.u
 const ownerPath = (env) => join(brokerDir(env), 'owner.json')
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const LOCK_WAIT_MS = 20_000
+const MIN_PLAUSIBLE_PID = 2
+const MAX_PLAUSIBLE_PID = 4_194_304
 
 function clientFor(rec) {
   return new OpencodeClient(baseUrlFor(rec), { password: rec.password })
@@ -96,7 +98,9 @@ export async function reapOrphans(env = process.env) {
   // guarantee: a live startup lock is never unlinked by stale cleanup.
   if (!await acquireLock(env)) return { cleared: false }
   try {
-    return { cleared: await cleanupOrphanLocked(env) }
+    const endpointCleared = await cleanupOrphanLocked(env)
+    const refsCleared = await repairRefsLocked(env)
+    return { cleared: endpointCleared || refsCleared }
   } finally {
     await releaseLock(env)
   }
@@ -284,6 +288,7 @@ async function writeRefs(refs, env) {
 
 const localHolderTokens = new Map()
 const SESSION_OWNER_LOOKUP_TIMEOUT_MS = 100
+export const SESSION_HOLDER_MAX_AGE_MS = 6 * 60 * 60 * 1000
 
 function localHolderKey(env, ccSessionId) {
   return `${refsPath(env)}\u0000${ccSessionId}`
@@ -305,39 +310,62 @@ function forgetLocalHolder(env, ccSessionId, holderToken) {
   else localHolderTokens.delete(key)
 }
 
-function isClaudeProcess(command) {
-  return /(?:^|[\s/])claude(?:[-\s]|$)/i.test(String(command ?? ''))
+function plausiblePid(value) {
+  const text = typeof value === 'number' ? String(value) : String(value ?? '').trim()
+  if (!/^\d+$/.test(text)) return null
+  const pid = Number(text)
+  return Number.isSafeInteger(pid) && pid >= MIN_PLAUSIBLE_PID && pid <= MAX_PLAUSIBLE_PID
+    ? pid
+    : null
 }
 
-async function sessionOwnerPid(env) {
-  const configured = Number(env.CLAUDE_CODE_SESSION_PID)
-  if (Number.isInteger(configured) && configured > 0) return configured
+function isClaudeProcess(command) {
+  const executable = String(command ?? '').trim().split(/\s+/, 1)[0]
+  return /(?:^|[\\/])claude(?:[-_]code)?(?:$|[-_])/i.test(executable)
+}
 
-  let current = process.ppid
-  let candidate = current
+async function processRecord(pid, env) {
+  let result
+  try {
+    result = await run('ps', ['-p', String(pid), '-o', 'pid=,ppid=,command='], {
+      env,
+      timeoutMs: SESSION_OWNER_LOOKUP_TIMEOUT_MS,
+    })
+  } catch {
+    return null
+  }
+  if (result.code !== 0 || result.timedOut) return null
+  const match = result.stdout.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/)
+  if (!match) return null
+  const recordPid = plausiblePid(match[1])
+  const parentPid = Number(match[2])
+  if (!recordPid || !Number.isSafeInteger(parentPid) || parentPid < 1) return null
+  return { pid: recordPid, parentPid, command: match[3].trim() }
+}
+
+async function sessionOwnerEvidence(env) {
+  const configured = plausiblePid(env.CLAUDE_CODE_SESSION_PID)
+  if (configured) {
+    const record = await processRecord(configured, env)
+    if (record?.pid === configured && isClaudeProcess(record.command)) {
+      return { pid: record.pid, command: record.command }
+    }
+  }
+
+  let current = plausiblePid(process.ppid)
   const seen = new Set()
-  for (let depth = 0; depth < 12 && Number.isInteger(current) && current > 0; depth += 1) {
+  for (let depth = 0; depth < 12 && current; depth += 1) {
     if (seen.has(current)) break
     seen.add(current)
-    let result
-    try {
-      result = await run('ps', ['-p', String(current), '-o', 'pid=,ppid=,command='], {
-        env,
-        timeoutMs: SESSION_OWNER_LOOKUP_TIMEOUT_MS,
-      })
-    } catch {
-      break
+    const record = await processRecord(current, env)
+    if (!record) break
+    if (isClaudeProcess(record.command)) {
+      return { pid: record.pid, command: record.command }
     }
-    const match = result.stdout.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/)
-    if (!match) break
-    const pid = Number(match[1])
-    const parentPid = Number(match[2])
-    if (isClaudeProcess(match[3])) return pid
-    if (parentPid <= 1 || parentPid === pid) break
-    candidate = parentPid
-    current = parentPid
+    if (record.parentPid <= 1 || record.parentPid === record.pid) break
+    current = plausiblePid(record.parentPid)
   }
-  return candidate
+  return null
 }
 
 function legacyHolderToken(ccSessionId, at) {
@@ -362,12 +390,18 @@ function normalizeRefs(raw) {
       if (!holder || typeof holder !== 'object' || Array.isArray(holder)) continue
       if (!Number.isFinite(holder.at)) continue
       const normalized = {
-        pid: Number.isInteger(holder.pid) ? holder.pid : null,
+        pid: plausiblePid(holder.pid),
         at: holder.at,
       }
       if (holder.scope === 'session') {
         normalized.scope = 'session'
-        normalized.sessionPid = Number.isInteger(holder.sessionPid) ? holder.sessionPid : null
+        normalized.sessionPid = plausiblePid(holder.sessionPid)
+        if (typeof holder.sessionCommand === 'string' && holder.sessionCommand.trim()) {
+          normalized.sessionCommand = holder.sessionCommand.trim()
+        }
+        normalized.expiresAt = Number.isFinite(holder.expiresAt)
+          ? holder.expiresAt
+          : holder.at + SESSION_HOLDER_MAX_AGE_MS
       }
       holders[holderToken] = normalized
     }
@@ -376,14 +410,32 @@ function normalizeRefs(raw) {
   return refs
 }
 
-function pruneDeadHolders(refs) {
+async function sessionHolderIsLive(holder, env, now) {
+  if (!Number.isFinite(holder.expiresAt) || holder.expiresAt <= now) return false
+  if (!holder.sessionPid) return true
+  if (!isAlive(holder.sessionPid)) return false
+  const record = await processRecord(holder.sessionPid, env)
+  return record?.pid === holder.sessionPid
+    && isClaudeProcess(record.command)
+    && (!holder.sessionCommand || holder.sessionCommand === record.command)
+}
+
+async function pruneDeadHolders(refs, env, { reclaimUnverified = false } = {}) {
+  const now = Date.now()
   for (const [ccSessionId, holders] of Object.entries(refs)) {
     for (const [holderToken, holder] of Object.entries(holders)) {
-      const ownerPid = holder.scope === 'session' ? holder.sessionPid : holder.pid
-      const fallbackPid = holder.scope === 'session' && !Number.isInteger(ownerPid)
-        ? holder.pid
-        : ownerPid
-      if (Number.isInteger(fallbackPid) && !isAlive(fallbackPid)) delete holders[holderToken]
+      if (holder.scope === 'session') {
+        if (!await sessionHolderIsLive(holder, env, now)) delete holders[holderToken]
+      } else if (holder.pid && !isAlive(holder.pid)) {
+        delete holders[holderToken]
+      } else if (reclaimUnverified
+        && !holder.pid
+        && holder.at + SESSION_HOLDER_MAX_AGE_MS <= now) {
+        // Migrated pid:null records have no owner witness. Repair gives them
+        // the same absolute reclamation guarantee as an unverified session
+        // holder without pruning a recent legacy holder during normal release.
+        delete holders[holderToken]
+      }
     }
     if (!Object.keys(holders).length) delete refs[ccSessionId]
   }
@@ -473,11 +525,26 @@ async function knownSessions(env) {
   return known
 }
 
+async function repairRefsLocked(env) {
+  const before = normalizeRefs(await readJson(refsPath(env), {}))
+  const beforeCount = holderCount(before)
+  const next = await pruneDeadHolders(before, env, { reclaimUnverified: true })
+  const afterCount = holderCount(next)
+  await writeRefs(next, env)
+
+  let brokerCleared = false
+  if (afterCount === 0) {
+    brokerCleared = Boolean(await readEndpoint(env))
+    await shutdownBrokerLocked(env)
+  }
+  return beforeCount !== afterCount || brokerCleared
+}
+
 // Counts returned by addRef/releaseRef are live holder records, not sessions.
 // A single Claude Code session can therefore contribute several references.
 export async function addRef(ccSessionId, env = process.env, holderToken, options = {}) {
   return await withLock(env, async () => {
-    const next = pruneDeadHolders(normalizeRefs(await readJson(refsPath(env), {})))
+    const next = await pruneDeadHolders(normalizeRefs(await readJson(refsPath(env), {})), env)
     const token = typeof holderToken === 'string' && holderToken
       ? holderToken
       : randomBytes(24).toString('hex')
@@ -486,7 +553,13 @@ export async function addRef(ccSessionId, env = process.env, holderToken, option
     const holder = { pid: process.pid, at: Date.now() }
     if (options.scope === 'session') {
       holder.scope = 'session'
-      holder.sessionPid = Number.isInteger(options.sessionPid) ? options.sessionPid : process.ppid
+      holder.sessionPid = plausiblePid(options.sessionPid)
+      if (typeof options.sessionCommand === 'string' && options.sessionCommand.trim()) {
+        holder.sessionCommand = options.sessionCommand.trim()
+      }
+      holder.expiresAt = Number.isFinite(options.expiresAt)
+        ? options.expiresAt
+        : holder.at + SESSION_HOLDER_MAX_AGE_MS
     }
     holders[token] = holder
     next[ccSessionId] = holders
@@ -497,13 +570,15 @@ export async function addRef(ccSessionId, env = process.env, holderToken, option
 }
 
 export async function addSessionRef(ccSessionId, env = process.env, holderToken) {
-  // The hook process is intentionally short-lived. Keep the Claude ancestor
-  // as the liveness witness; a crashed Claude process therefore becomes
-  // reclaimable even when it never emitted SessionEnd.
-  const sessionPid = await sessionOwnerPid(env)
+  // Only a verified Claude process is used as the session liveness witness.
+  // An absent, malformed, out-of-range, wrapper, or non-Claude PID is ignored;
+  // the holder then relies on its absolute expiry instead of trusting a raw
+  // PID that could be reused by an unrelated process.
+  const evidence = await sessionOwnerEvidence(env)
   return addRef(ccSessionId, env, holderToken, {
     scope: 'session',
-    sessionPid,
+    sessionPid: evidence?.pid,
+    sessionCommand: evidence?.command,
   })
 }
 
@@ -527,7 +602,7 @@ async function shutdownBrokerLocked(env) {
 
 export async function releaseRef(ccSessionId, env = process.env, holderToken) {
   return await withLock(env, async () => {
-    const next = pruneDeadHolders(normalizeRefs(await readJson(refsPath(env), {})))
+    const next = await pruneDeadHolders(normalizeRefs(await readJson(refsPath(env), {})), env)
     const tokenless = !(typeof holderToken === 'string' && holderToken)
     let released = false
     const holders = next[ccSessionId]

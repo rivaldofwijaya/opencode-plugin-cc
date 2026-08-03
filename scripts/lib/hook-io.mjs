@@ -5,7 +5,14 @@ import { stateRoot } from './state.mjs'
 
 const DEFAULT_PAYLOAD_TIMEOUT_MS = 1_000
 const MAX_PAYLOAD_BYTES = 1_024 * 1_024
-export const HOOK_FAILURE_LOG_TIMEOUT_MS = 250
+export const HOOK_FAILURE_LOG_TIMEOUT_MS = 150
+
+export function installHookSafety(timeoutMs) {
+  const forceExit = () => process.exit(0)
+  process.once('unhandledRejection', forceExit)
+  process.once('uncaughtException', forceExit)
+  setTimeout(forceExit, Math.max(0, timeoutMs))
+}
 
 function objectPayload(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -119,6 +126,13 @@ export async function logHookFailure({ hook, event, error, env = process.env }) 
 }
 
 export async function logHookFailureBounded(args, timeoutMs = HOOK_FAILURE_LOG_TIMEOUT_MS) {
+  if ((args.env ?? process.env).OPENCODE_TEST_THROW_HOOK_FAILURE_LOGGING === '1') {
+    // Keep the rejection in the logger itself and leave its await pending so
+    // the entrypoint's process-level rejection guard, rather than the work
+    // timeout, is what proves the structural exit guarantee.
+    void Promise.reject(new Error('injected failure-logging rejection'))
+    return await new Promise(() => {})
+  }
   const payload = JSON.stringify({
     hook: args.hook,
     event: args.event,
