@@ -4,7 +4,7 @@ import { chmod, mkdtemp, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { run, isAlive, spawnDetached, terminate } from '../../scripts/lib/process.mjs'
+import { run, isAlive, spawnDetached, terminate, TERMINATE_GRACE_MS } from '../../scripts/lib/process.mjs'
 import {
   createJob,
   readJob,
@@ -16,6 +16,42 @@ import { refsPath } from '../../scripts/lib/broker-endpoint.mjs'
 
 const companion = fileURLToPath(new URL('../../scripts/opencode-companion.mjs', import.meta.url))
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
+const WORKER_EXIT_WAIT_MARGIN_MS = 1000
+
+function observeChildExit(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
+  return new Promise((resolve, reject) => {
+    const onExit = () => {
+      child.off('error', onError)
+      resolve()
+    }
+    const onError = (error) => {
+      child.off('exit', onExit)
+      reject(error)
+    }
+
+    child.once('exit', onExit)
+    child.once('error', onError)
+  })
+}
+
+function waitForChildExit(child, observed, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`worker ${child.pid} did not emit an exit event within ${timeoutMs}ms`))
+    }, timeoutMs)
+    observed.then(
+      () => {
+        clearTimeout(timer)
+        resolve()
+      },
+      (error) => {
+        clearTimeout(timer)
+        reject(error)
+      },
+    )
+  })
+}
 
 async function sandbox(extra = {}) {
   const home = await mkdtemp(join(tmpdir(), 'ocjv-'))
@@ -271,6 +307,7 @@ test('cancel signals a worker only when its owner record and command line agree'
     '--',
     '--opencode-job-worker', job.id, workerToken,
   ])
+  const workerExited = observeChildExit(worker)
   try {
     await writeFile(join(jobDir(mismatchedJob.id, s.env), 'worker-owner.json'), JSON.stringify({
       jobId: mismatchedJob.id,
@@ -306,9 +343,8 @@ test('cancel signals a worker only when its owner record and command line agree'
     }, s.home, ['cancel', job.id])
     assert.equal(r.code, 0)
     assert.match(r.stdout, /cancelled/i)
-    const deadline = Date.now() + 3000
-    while (Date.now() < deadline && isAlive(worker.pid)) await new Promise((resolve) => setTimeout(resolve, 25))
-    assert.equal(isAlive(worker.pid), false)
+    await waitForChildExit(worker, workerExited, TERMINATE_GRACE_MS + WORKER_EXIT_WAIT_MARGIN_MS)
+    assert.equal(worker.exitCode !== null || worker.signalCode !== null, true)
     assert.equal((await readJson(refsPath(s.env), {}))[s.env.CLAUDE_SESSION_ID]?.[workerToken], undefined)
   } finally {
     if (isAlive(mismatchedWorker.pid)) await terminate(mismatchedWorker.pid, { graceMs: 1000 })

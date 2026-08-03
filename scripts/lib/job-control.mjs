@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { addRef, ensureBroker, releaseRef } from './broker-lifecycle.mjs'
 import { atomicWrite } from './fs.mjs'
-import { spawnDetached, terminate, isAlive, run } from './process.mjs'
+import { spawnDetached, terminate, isAlive, run, TERMINATE_GRACE_MS } from './process.mjs'
 import { jobDir } from './state.mjs'
 import { refsPath } from './broker-endpoint.mjs'
 import {
@@ -459,7 +459,7 @@ export async function cancelJob(jobId, env = process.env, { ensureBrokerFn = ens
     }
   }
   if (job.pid && job.pid !== process.pid && workerToken) {
-    await terminateWorkerAndRelease(job.ccSessionId, job.pid, workerToken, env, 3000)
+    await terminateWorkerAndRelease(job.ccSessionId, job.pid, workerToken, env, TERMINATE_GRACE_MS)
   }
   return 'cancelled'
 }
