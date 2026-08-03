@@ -8,16 +8,23 @@ import { run } from '../../scripts/lib/process.mjs'
 import { readEndpoint } from '../../scripts/lib/broker-endpoint.mjs'
 import { readJson, sessionsDir } from '../../scripts/lib/state.mjs'
 import { rememberOpencodeSession } from '../../scripts/lib/tracked-jobs.mjs'
-import { handlers } from '../../scripts/opencode-companion.mjs'
+import { ccSessionId, handlers } from '../../scripts/opencode-companion.mjs'
 
 const companion = fileURLToPath(new URL('../../scripts/opencode-companion.mjs', import.meta.url))
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
 
 async function persistedSession(s) {
   return readJson(
-    join(sessionsDir(s.env), `${encodeURIComponent(s.env.CLAUDE_SESSION_ID)}.json`),
+    join(sessionsDir(s.env), `${encodeURIComponent(ccSessionId(s.env))}.json`),
     null,
   )
+}
+
+function withoutSessionEnv(env) {
+  const copy = { ...env }
+  delete copy.CLAUDE_SESSION_ID
+  delete copy.CLAUDE_CODE_SESSION_ID
+  return copy
 }
 
 async function sandbox() {
@@ -84,6 +91,31 @@ async function stubbedPartialTransfer(s) {
   }
 }
 
+async function stubbedSuccessfulTransfer(s, env) {
+  return handlers.transfer({
+    flags: {},
+    env,
+    cwd: s.home,
+    ccSessionId: ccSessionId(env),
+    runDoctorFn: async () => ({
+      binary: { ok: true },
+      version: { ok: true },
+      auth: { ok: true },
+      model: { ok: true },
+      gaps: [],
+    }),
+    addRefFn: async () => {},
+    releaseRefFn: async () => {},
+    ensureBrokerFn: async () => ({
+      client: {
+        createSession: async () => ({ id: 'ses_stub' }),
+        promptAsync: async () => {},
+      },
+    }),
+    rememberOpencodeSessionFn: rememberOpencodeSession,
+  })
+}
+
 test('transfer writes a handoff, creates a session, and prints the resume command', async (t) => {
   const s = await sandbox()
   const r = await run(process.execPath, [companion, 'transfer'], { env: s.env, cwd: s.home, timeoutMs: 60000 })
@@ -102,6 +134,29 @@ test('transfer writes a handoff, creates a session, and prints the resume comman
   assert.equal(record?.ccSessionId, s.env.CLAUDE_SESSION_ID)
   assert.equal(record?.lastOpencodeSession, sessionMatch[1])
   assert.equal(await readEndpoint(s.env), null)
+})
+
+test('transfer without session env uses a valid fallback with an explicit transcript', async () => {
+  const s = await sandbox()
+  const env = withoutSessionEnv(s.env)
+  const cliResult = await run(process.execPath, [companion, 'transfer'], { env, cwd: s.home, timeoutMs: 60000 })
+  const fallback = isBindFailure(cliResult) ? await stubbedSuccessfulTransfer(s, env) : null
+  const r = fallback
+    ? { code: fallback.exitCode, stdout: fallback.stdout, stderr: '' }
+    : cliResult
+  assert.equal(r.code, 0, r.stderr)
+  const sessionMatch = r.stdout.match(/(?:opencode --session|Seeded opencode session: )?(ses_\S+)/)
+  assert.ok(sessionMatch, r.stdout)
+  const pathMatch = r.stdout.match(/(\S+\.md)/)
+  assert.ok(pathMatch)
+  assert.match(pathMatch[1], /\/transfers\/0-\d+\.md$/)
+  const handoff = await readFile(pathMatch[1], 'utf8')
+  assert.match(handoff, /port the parser/)
+  assert.match(handoff, /Claude Code session: 0/)
+  const record = await persistedSession({ ...s, env })
+  assert.equal(record?.ccSessionId, '0')
+  assert.equal(record?.lastOpencodeSession, sessionMatch[1])
+  assert.equal(await readEndpoint(env), null)
 })
 
 test('transfer refuses an unsafe Claude Code session id before discovery or setup', async () => {
@@ -127,6 +182,36 @@ test('transfer --out writes to the requested path', async (t) => {
   assert.equal(await readEndpoint(s.env), null)
 })
 
+test('transfer --out remains an explicit caller-supplied path outside session containment', async () => {
+  const s = await sandbox()
+  const out = join(s.home, 'caller-out.md')
+  const result = await handlers.transfer({
+    flags: { out },
+    env: s.env,
+    cwd: s.home,
+    ccSessionId: s.env.CLAUDE_SESSION_ID,
+    runDoctorFn: async () => ({
+      binary: { ok: true },
+      version: { ok: true },
+      auth: { ok: true },
+      model: { ok: true },
+      gaps: [],
+    }),
+    addRefFn: async () => {},
+    releaseRefFn: async () => {},
+    ensureBrokerFn: async () => ({
+      client: {
+        createSession: async () => ({ id: 'ses_out' }),
+        promptAsync: async () => {},
+      },
+    }),
+    rememberOpencodeSessionFn: rememberOpencodeSession,
+  })
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.stdout.startsWith(`Handoff written to ${out}`), true)
+  assert.match(await readFile(out, 'utf8'), /port the parser/)
+})
+
 test('transfer without a findable transcript still produces a handoff and says so', async (t) => {
   const s = await sandbox()
   const env = { ...s.env, CLAUDE_TRANSCRIPT_PATH: join(s.home, 'missing.jsonl') }
@@ -139,6 +224,38 @@ test('transfer without a findable transcript still produces a handoff and says s
   assert.equal(record?.ccSessionId, env.CLAUDE_SESSION_ID)
   assert.match(record?.lastOpencodeSession ?? '', /^ses_/)
   assert.equal(await readEndpoint(env), null)
+})
+
+test('transfer without session env and without a transcript still writes the fallback handoff', async () => {
+  const s = await sandbox()
+  const env = withoutSessionEnv(s.env)
+  delete env.CLAUDE_TRANSCRIPT_PATH
+  const cliResult = await run(process.execPath, [companion, 'transfer'], { env, cwd: s.home, timeoutMs: 60000 })
+  const fallback = isBindFailure(cliResult) ? await stubbedSuccessfulTransfer(s, env) : null
+  const r = fallback
+    ? { code: fallback.exitCode, stdout: fallback.stdout, stderr: '' }
+    : cliResult
+  assert.equal(r.code, 0, r.stderr)
+  assert.match(r.stdout, /could not be located/i)
+  assert.match(r.stdout, /Handoff written to \S+\/transfers\/0-\d+\.md/)
+  assert.match(r.stdout, /Seeded opencode session: ses_/)
+  const record = await persistedSession({ ...s, env })
+  assert.equal(record?.ccSessionId, '0')
+  assert.match(record?.lastOpencodeSession ?? '', /^ses_/)
+  assert.equal(await readEndpoint(env), null)
+})
+
+test('task-resume-candidate remains usable without session environment variables', async () => {
+  const s = await sandbox()
+  const env = withoutSessionEnv(s.env)
+  const r = await run(process.execPath, [companion, 'task-resume-candidate', '--json'], { env, cwd: s.home, timeoutMs: 60000 })
+  assert.equal(r.code, 0, r.stderr)
+  assert.deepEqual(JSON.parse(r.stdout), {
+    hasCandidate: false,
+    sessionID: null,
+    lastVerb: null,
+    lastEndedAt: null,
+  })
 })
 
 test('transfer reports a malformed transcript as a partial gap and keeps valid context', async () => {

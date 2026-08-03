@@ -51,6 +51,51 @@ function isWithin(root, path) {
   )
 }
 
+export function resolveContainedPath(root, segments, {
+  code = 'PATH_OUTSIDE_ROOT',
+  transferKind = 'invalid-path',
+  label = 'path',
+} = {}) {
+  const rootPath = resolve(root)
+  const candidate = resolve(rootPath, ...(Array.isArray(segments) ? segments : [segments]))
+  if (!isWithin(rootPath, candidate)) {
+    const error = new Error(`refusing ${label} outside ${rootPath}: ${candidate}`)
+    error.code = code
+    error.transferKind = transferKind
+    error.path = candidate
+    throw error
+  }
+  return candidate
+}
+
+export function transcriptCandidatePath({ projectsRoot, slug, ccSessionId }) {
+  return resolveContainedPath(projectsRoot, [slug, `${String(ccSessionId)}.jsonl`], {
+    code: 'TRANSCRIPT_PATH_OUTSIDE_PROJECTS',
+    transferKind: 'invalid-transcript-path',
+    label: 'Claude Code transcript path',
+  })
+}
+
+export function handoffPath({ env = process.env, ccSessionId, timestamp = Date.now() }) {
+  const root = stateRoot(env)
+  return resolveContainedPath(root, ['transfers', `${String(ccSessionId)}-${timestamp}.md`], {
+    code: 'HANDOFF_PATH_OUTSIDE_STATE',
+    transferKind: 'invalid-handoff-path',
+    label: 'Claude Code handoff path',
+  })
+}
+
+// Validated session ids contain only characters that encodeURIComponent leaves
+// unchanged, so this is the same filename component used by tracked-jobs.mjs.
+export function persistedSessionPath({ env = process.env, ccSessionId }) {
+  const root = stateRoot(env)
+  return resolveContainedPath(root, ['sessions', `${String(ccSessionId)}.json`], {
+    code: 'PERSISTED_SESSION_PATH_OUTSIDE_STATE',
+    transferKind: 'invalid-persisted-session-path',
+    label: 'persisted Claude Code session path',
+  })
+}
+
 export async function transcriptPath({ env = process.env, ccSessionId, cwd, accessFn = access }) {
   const sessionId = validateCcSessionId(ccSessionId)
   const explicit = env.CLAUDE_TRANSCRIPT_PATH
@@ -60,13 +105,7 @@ export async function transcriptPath({ env = process.env, ccSessionId, cwd, acce
   if (!home) return null
   const slug = String(cwd ?? '').replaceAll('/', '-').replaceAll('.', '-')
   const projectsRoot = resolve(home, '.claude', 'projects')
-  const candidate = resolve(projectsRoot, slug, `${sessionId}.jsonl`)
-  if (!isWithin(projectsRoot, candidate)) {
-    const error = new Error(`refusing Claude Code transcript path outside ${projectsRoot}: ${candidate}`)
-    error.code = 'TRANSCRIPT_PATH_OUTSIDE_PROJECTS'
-    error.transferKind = 'invalid-transcript-path'
-    throw error
-  }
+  const candidate = transcriptCandidatePath({ projectsRoot, slug, ccSessionId: sessionId })
   return (await exists(candidate, accessFn)) ? candidate : null
 }
 
@@ -199,8 +238,8 @@ export function buildHandoff({ messages, cwd, ccSessionId, maxChars = 120_000 })
 export async function writeHandoff({ text, ccSessionId, env = process.env }) {
   const sessionId = validateCcSessionId(ccSessionId)
   const dir = join(stateRoot(env), 'transfers')
+  const path = handoffPath({ env, ccSessionId: sessionId })
   await ensureDir(dir)
-  const path = join(dir, `${sessionId}-${Date.now()}.md`)
   await atomicWrite(path, String(text))
   return path
 }

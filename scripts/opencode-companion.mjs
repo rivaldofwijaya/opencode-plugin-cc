@@ -23,6 +23,7 @@ import {
   buildHandoff,
   writeHandoff,
   validateCcSessionId,
+  persistedSessionPath,
 } from './lib/claude-session-transfer.mjs'
 import { atomicWrite } from './lib/fs.mjs'
 import {
@@ -45,6 +46,14 @@ export const EXIT_CODES = Object.freeze({
   INVALID_INVOCATION: 2,
   CRASH: 3,
 })
+
+const SESSION_STATE_VERBS = new Set([
+  'task-resume-candidate',
+  'task',
+  'review',
+  'adversarial-review',
+  'transfer',
+])
 
 // These later handlers intentionally bypass the doctor preflight while they
 // repair or inspect setup state: setup, set-key, set-model, gate, repair,
@@ -326,6 +335,8 @@ const handlers = {
     } catch (error) {
       throw new CompanionError(error.message, EXIT_CODES.INVALID_INVOCATION)
     }
+
+    ensurePersistedSessionPath({ env, ccSessionId: sessionId })
 
     const report = await runDoctorFn({ env, cwd, checkServer: false })
     requireReady(report)
@@ -625,6 +636,14 @@ function errorDetail(error) {
   return error instanceof Error ? error.message : String(error)
 }
 
+function ensurePersistedSessionPath({ env, ccSessionId }) {
+  try {
+    persistedSessionPath({ env, ccSessionId })
+  } catch (error) {
+    throw new CompanionError(error.message, EXIT_CODES.INVALID_INVOCATION)
+  }
+}
+
 const AMBIGUOUS_CANDIDATE_REASON = 'ambiguous-record: remembered task record is ambiguous'
 
 function candidatePayload({ hasCandidate, status, reason, sessionID = null, last = null }) {
@@ -822,7 +841,7 @@ function usage() {
 }
 
 export function ccSessionId(env = process.env) {
-  return env.CLAUDE_SESSION_ID || env.CLAUDE_CODE_SESSION_ID || 'default'
+  return env.CLAUDE_SESSION_ID || env.CLAUDE_CODE_SESSION_ID || '0'
 }
 
 function editDistance(left, right) {
@@ -938,6 +957,10 @@ async function main(argv, env = process.env, cwd = process.cwd()) {
   }
 
   try {
+    const sessionId = ccSessionId(env)
+    if (SESSION_STATE_VERBS.has(verb)) {
+      ensurePersistedSessionPath({ env, ccSessionId: sessionId })
+    }
     validateInvocation({ verb, flags, positional, flagTokens })
     if (flags.help) {
       process.stdout.write(usage() + '\n')
@@ -945,7 +968,7 @@ async function main(argv, env = process.env, cwd = process.cwd()) {
     }
 
     const result = checkedHandlerResult(
-      await handler({ flags, positional, env, cwd, ccSessionId: ccSessionId(env) }),
+      await handler({ flags, positional, env, cwd, ccSessionId: sessionId }),
     )
     if (result?.stdout) process.stdout.write(result.stdout.endsWith('\n') ? result.stdout : result.stdout + '\n')
     return result.exitCode

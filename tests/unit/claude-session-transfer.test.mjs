@@ -10,8 +10,11 @@ import {
   buildHandoff,
   writeHandoff,
   validateCcSessionId,
+  transcriptCandidatePath,
+  handoffPath,
+  persistedSessionPath,
 } from '../../scripts/lib/claude-session-transfer.mjs'
-import { buildTransferPrompt } from '../../scripts/opencode-companion.mjs'
+import { buildTransferPrompt, ccSessionId } from '../../scripts/opencode-companion.mjs'
 
 test('transcriptPath prefers CLAUDE_TRANSCRIPT_PATH when it exists', async () => {
   const d = await mkdtemp(join(tmpdir(), 'octr-'))
@@ -81,6 +84,22 @@ test('validateCcSessionId accepts bounded safe ids and rejects an unsafe boundar
   assert.throws(
     () => validateCcSessionId('a'.repeat(128) + '0'),
     error => error?.code === 'INVALID_SESSION_ID',
+  )
+})
+
+test('ccSessionId uses a valid fallback and honors the alternate environment name', () => {
+  assert.equal(ccSessionId({}), '0')
+  assert.equal(ccSessionId({ CLAUDE_CODE_SESSION_ID: 'face' }), 'face')
+})
+
+test('transcript candidate containment refuses a route outside the projects root', () => {
+  assert.throws(
+    () => transcriptCandidatePath({
+      projectsRoot: '/sandbox/home/.claude/projects',
+      slug: '../../outside',
+      ccSessionId: 'a',
+    }),
+    error => error?.code === 'TRANSCRIPT_PATH_OUTSIDE_PROJECTS',
   )
 })
 
@@ -205,6 +224,27 @@ test('writeHandoff refuses an unsafe session id before creating its output direc
       env: { XDG_STATE_HOME: state, HOME: '/nonexistent' },
     }),
     error => error?.code === 'INVALID_SESSION_ID',
+  )
+})
+
+test('handoff containment refuses a route outside the state root', () => {
+  assert.throws(
+    () => handoffPath({
+      env: { XDG_STATE_HOME: '/sandbox/state', HOME: '/nonexistent' },
+      ccSessionId: '../../outside',
+      timestamp: 0,
+    }),
+    error => error?.code === 'HANDOFF_PATH_OUTSIDE_STATE',
+  )
+})
+
+test('persisted-session containment refuses a route outside the state root', () => {
+  assert.throws(
+    () => persistedSessionPath({
+      env: { XDG_STATE_HOME: '/sandbox/state', HOME: '/nonexistent' },
+      ccSessionId: '../../outside',
+    }),
+    error => error?.code === 'PERSISTED_SESSION_PATH_OUTSIDE_STATE',
   )
 })
 
