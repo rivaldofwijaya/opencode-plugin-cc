@@ -8,6 +8,29 @@ export function formatElapsed(ms) {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
 }
 
+function formatJobTime(job) {
+  const started = Number.isFinite(job?.startedAt) && job.startedAt > 0
+    ? `started ${new Date(job.startedAt).toISOString()}`
+    : null
+  const ended = Number.isFinite(job?.endedAt) && job.endedAt > 0
+    ? `ended ${new Date(job.endedAt).toISOString()}`
+    : null
+  return [started, ended].filter(Boolean).join('; ')
+}
+
+function stateNotice(job) {
+  if (job?.state === 'failed') return 'This job failed; the captured output may be incomplete.'
+  if (job?.state === 'cancelled') return 'This job was cancelled; the captured output is only a partial result.'
+  if (job?.state === 'timed-out') return 'This job timed out; the captured output is only a partial result.'
+  if (job?.state === 'stale') return 'This job is stale because its execution owner is no longer alive.'
+  return null
+}
+
+function truncationNotice(job, formatted) {
+  if (formatted || !job?.meta?.truncated) return null
+  return 'Note: the input diff was truncated before this job ran; any review result may be incomplete.'
+}
+
 function incompleteFinding(finding, index) {
   if (finding === null || typeof finding !== 'object' || Array.isArray(finding)) {
     return `finding ${index + 1} is not an object`
@@ -83,22 +106,30 @@ export function renderJobList(jobs, now = Date.now()) {
         ? `${counters.inputTokens ?? 0}in/${counters.outputTokens ?? 0}out tokens`
         : null,
     ].filter(Boolean).join(', ')
-    lines.push(`  ${job.id}  ${job.verb.padEnd(8)} ${job.state.padEnd(9)} ${elapsed.padStart(7)}${counterText ? `  ${counterText}` : ''}`)
+    const when = formatJobTime(job)
+    lines.push(`  ${job.id}  ${job.verb.padEnd(16)} ${job.state.padEnd(9)} ${elapsed.padStart(7)}${counterText ? `  ${counterText}` : ''}${when ? `  (${when})` : ''}`)
     if (job.error) lines.push(`      error: ${job.error}`)
   }
   return lines.join('\n')
 }
 
-export function renderJobResult(job, resultText) {
-  const head = `opencode ${job.verb} ${job.id} — ${job.state}`
+export function renderJobResult(job, resultText, { formatted = false } = {}) {
+  const when = formatJobTime(job)
+  const head = `opencode ${job.verb} ${job.id} — ${job.state}${when ? ` (${when})` : ''}`
+  const context = [
+    head,
+    truncationNotice(job, formatted),
+    stateNotice(job),
+    job.error ? `Error: ${job.error}` : null,
+  ].filter(Boolean)
   if (job.state === 'running') {
     const body = resultText && resultText.trim()
       ? resultText
       : '(no output yet — the job has not produced text)'
-    return [head, 'This job is still running; the output below is a partial tail.', '', body].join('\n')
+    return [...context, 'This job is still running; the output below is a partial tail.', '', body].join('\n')
   }
-  if (!resultText || !resultText.trim()) return [head, '', '(no output was produced)'].join('\n')
-  return [head, '', resultText].join('\n')
+  if (!resultText || !resultText.trim()) return [...context, '', '(no output was produced)'].join('\n')
+  return [...context, '', resultText].join('\n')
 }
 
 export function renderDoctor(report) {

@@ -87,6 +87,16 @@ test('renderJobResult reports a job with no output yet', () => {
   assert.match(out, /no output yet/i)
 })
 
+test('renderJobResult keeps terminal state and truncation visible out of context', () => {
+  const out = renderJobResult({
+    id: 'job_a', verb: 'review', state: 'cancelled', startedAt: 1_000,
+    endedAt: 2_000, meta: { truncated: true }, counters: {},
+  }, null)
+  assert.match(out, /cancelled/i)
+  assert.match(out, /truncated/i)
+  assert.match(out, /started|ended/i)
+})
+
 test('renderDoctor prints the status table and gaps', () => {
   const out = renderDoctor({
     ok: false,
