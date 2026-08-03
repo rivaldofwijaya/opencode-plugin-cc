@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -292,7 +292,11 @@ test('a stale job record lock is reclaimed', async () => {
 })
 
 test('cancelJob aborts a running foreground job', async (t) => {
-  const env = await sandbox({ FAKE_OPENCODE_EVENT_DELAY_MS: '300' })
+  const env = await sandbox({
+    FAKE_OPENCODE_EVENT_DELAY_MS: '300',
+  })
+  const requestLog = join(env.XDG_STATE_HOME, 'foreground-cancel-requests.jsonl')
+  env.FAKE_OPENCODE_REQUEST_LOG = requestLog
   const startingRefs = await readJson(refsPath(env), {})
   let jobId
   try {
@@ -304,6 +308,8 @@ test('cancelJob aborts a running foreground job', async (t) => {
     const settled = await started.done
     assert.equal(settled.state, 'cancelled')
     assert.equal((await readJob(jobId, env)).state, 'cancelled')
+    const requests = (await readFile(requestLog, 'utf8')).trim().split('\n').map((line) => JSON.parse(line))
+    assert.ok(requests.some((request) => request.type === 'abort' && request.sessionID === started.sessionID))
     assert.deepEqual(await readJson(refsPath(env), {}), startingRefs)
   } catch (error) {
     if (bindFailure(error)) {
@@ -400,7 +406,7 @@ test('cancelJob does not abort an unowned session', async () => {
     cwd: repoCwd,
     background: true,
   }, env)
-  await updateJob(job.id, { sessionID: 'session-owned-elsewhere' }, env)
+  await updateJob(job.id, { pid: process.pid, sessionID: 'session-owned-elsewhere' }, env)
   const aborted = []
   const ensureBrokerFn = async () => ({
     client: {

@@ -24,6 +24,7 @@ const WORKER_HANDOFF_TIMEOUT_MS = 10_000
 const WORKER_FLAG = '--opencode-job-worker'
 const WORKER_MODULE = fileURLToPath(import.meta.url)
 const TERMINAL_JOB_STATES = new Set(['done', 'failed', 'cancelled'])
+const foregroundJobIds = new Set()
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -363,6 +364,7 @@ export async function startJob({
     background,
     meta: { agent, model, variant, ...(meta ?? {}) },
   }, env)
+  if (!background) foregroundJobIds.add(job.id)
 
   let releaseBrokerRef
   let workerOwnsRef = false
@@ -414,9 +416,14 @@ export async function startJob({
       broker, jobId: job.id, sessionID, promptOptions, env, releaseBrokerRef,
     })
     executionOwnsRef = true
+    void execution.done.then(
+      () => foregroundJobIds.delete(job.id),
+      () => foregroundJobIds.delete(job.id),
+    )
     await execution.promptStarted
     return { jobId: job.id, sessionID, done: execution.done }
   } catch (error) {
+    foregroundJobIds.delete(job.id)
     if (!executionOwnsRef && (!workerOwnsRef || !launcherRefReleased)) await releaseLauncherRef()
     await failJob(job.id, error, env)
     throw error
@@ -435,11 +442,11 @@ export async function cancelJob(jobId, env = process.env, { ensureBrokerFn = ens
 
   await updateJob(jobId, { state: 'cancelled', endedAt: Date.now() }, env)
   const workerToken = await ownedWorkerToken(job, env)
-  // Foreground ownership is proven by this process's PID. Background jobs
-  // need the worker-owner record, a live PID, and a matching command line.
+  // Foreground ownership is proven by this process's in-memory start registry.
+  // Background jobs need the worker-owner record, a live PID, and a matching command line.
   // If neither proof is available, durable cancellation remains authoritative
   // and no broker session is signalled because it may belong to another job.
-  const ownsExecution = job.pid === process.pid || Boolean(workerToken)
+  const ownsExecution = foregroundJobIds.has(job.id) || Boolean(workerToken)
   if (job.sessionID && ownsExecution) {
     try {
       const broker = await ensureBrokerFn({ env })
