@@ -2,14 +2,24 @@
 import { readGate } from './lib/gate.mjs'
 import { runDoctor } from './lib/doctor.mjs'
 import { prepareReview, REVIEW_AGENT, REVIEW_TOOLS } from './lib/review-job.mjs'
-import { runForeground } from './lib/job-control.mjs'
-import { readResult } from './lib/tracked-jobs.mjs'
+import { cancelJob, runForeground } from './lib/job-control.mjs'
+import { listJobs, readResult } from './lib/tracked-jobs.mjs'
+import { releaseRef } from './lib/broker-lifecycle.mjs'
 import { parseReviewOutput } from './lib/review-schema.mjs'
-import { logHookFailure, readPayload, withTimeout } from './lib/hook-io.mjs'
+import { logHookFailureBounded, readPayload, withTimeout } from './lib/hook-io.mjs'
 
 const BLOCKING = new Set(['critical', 'high'])
-const GATE_TIMEOUT_MS = 110_000
-const PAYLOAD_TIMEOUT_MS = 1_000
+const DEFAULT_GATE_TIMEOUT_MS = 105_000
+const GATE_TIMEOUT_MS = (() => {
+  const configured = Number(process.env.OPENCODE_STOP_GATE_TIMEOUT_MS)
+  return Number.isFinite(configured) && configured > 0
+    ? Math.min(configured, DEFAULT_GATE_TIMEOUT_MS)
+    : DEFAULT_GATE_TIMEOUT_MS
+})()
+const GATE_CLEANUP_TIMEOUT_MS = 5_000
+const PAYLOAD_TIMEOUT_MS = 200
+
+let gateRun
 
 function payloadSessionId(payload) {
   if (typeof payload?.session_id === 'string' && payload.session_id.trim()) {
@@ -51,6 +61,10 @@ async function evaluateGate() {
 
   const payload = await readPayload({ timeoutMs: PAYLOAD_TIMEOUT_MS })
   const ccSessionId = payloadSessionId(payload)
+  gateRun = {
+    ccSessionId,
+    initialJobIds: new Set((await listJobs(ccSessionId)).map(job => job.id)),
+  }
   const cwd = payloadCwd(payload)
   const report = await runDoctor({ cwd, checkServer: false })
   if (!report.ok) return null
@@ -87,6 +101,36 @@ async function evaluateGate() {
   return { decision: 'block', reason: renderBlockingFindings(blocking) }
 }
 
+async function cleanupTimedOutGate() {
+  if (!gateRun) return
+  const jobs = await listJobs(gateRun.ccSessionId)
+  const startedByThisHook = jobs.filter(job => (
+    job.state === 'running'
+      && job.verb === 'gate'
+      && !gateRun.initialJobIds.has(job.id)
+  ))
+
+  await Promise.all(startedByThisHook.map(job => (
+    cancelJob(job.id).catch(() => {})
+  )))
+  // startJob's foreground holder is local to this hook process. This is
+  // idempotent with the execution's eventual release and prevents a timed-out
+  // hook from leaving its broker reference behind.
+  await releaseRef(gateRun.ccSessionId).catch(() => {})
+}
+
+async function cleanupTimedOutGateWithinBudget() {
+  try {
+    await withTimeout(
+      () => cleanupTimedOutGate(),
+      GATE_CLEANUP_TIMEOUT_MS,
+      'Stop review cleanup',
+    )
+  } catch {
+    // The durable job PID and broker holder records remain for repair/pruning.
+  }
+}
+
 async function main() {
   try {
     const decision = await withTimeout(
@@ -97,7 +141,8 @@ async function main() {
     if (decision) process.stdout.write(JSON.stringify(decision) + '\n')
   } catch (error) {
     // R18.1: log best-effort hook failures and let the user's turn finish.
-    await logHookFailure({ hook: 'stop-review-gate', event: 'Stop', error })
+    await cleanupTimedOutGateWithinBudget()
+    await logHookFailureBounded({ hook: 'stop-review-gate', event: 'Stop', error })
   }
 
   // R18.1 exemption: the best-effort Stop hook always exits 0 so a plugin

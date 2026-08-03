@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, writeFile, readFile, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,7 +8,9 @@ import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import { isAlive, run, spawnDetached, terminate } from '../../scripts/lib/process.mjs'
 import { createJob, readJob, updateJob } from '../../scripts/lib/tracked-jobs.mjs'
-import { jobDir } from '../../scripts/lib/state.mjs'
+import { brokerDir, jobDir, readJson, writeJson } from '../../scripts/lib/state.mjs'
+import { refsPath, readEndpoint, writeEndpoint } from '../../scripts/lib/broker-endpoint.mjs'
+import { shutdownBroker } from '../../scripts/lib/broker-lifecycle.mjs'
 import { prepareReview } from '../../scripts/lib/review-job.mjs'
 
 const lifecycle = fileURLToPath(new URL('../../scripts/session-lifecycle-hook.mjs', import.meta.url))
@@ -74,6 +77,25 @@ function openPipeHook(script, args, env) {
   })
 }
 
+async function withFakeOwnedBroker(env, callback) {
+  const child = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  const password = 'test-password'
+  const startedAt = Date.now()
+  await writeEndpoint({ port: 1, pid: child.pid, password, startedAt }, env)
+  await writeJson(join(brokerDir(env), 'owner.json'), {
+    pid: child.pid,
+    port: 1,
+    startedAt,
+    passwordHash: createHash('sha256').update(password).digest('hex'),
+  })
+  try {
+    return await callback(child)
+  } finally {
+    await shutdownBroker(env)
+    if (isAlive(child.pid)) await terminate(child.pid, { graceMs: 1000 })
+  }
+}
+
 test('SessionStart registers the session and exits 0 silently', async () => {
   const s = await sandbox()
   const r = await hook(lifecycle, ['SessionStart'], s.env, { session_id: 'cc-1', cwd: s.repo })
@@ -87,14 +109,30 @@ test('SessionStart never blocks even when the binary is missing', async () => {
   const s = await sandbox({ OPENCODE_BIN: '/nonexistent/opencode' })
   const r = await hook(lifecycle, ['SessionStart'], s.env, { session_id: 'cc-1', cwd: s.repo })
   assert.equal(r.code, 0)
+  assert.deepEqual(
+    await readdir(join(s.env.XDG_STATE_HOME, 'opencode-plugin-cc', 'sessions')),
+    ['cc-1.json'],
+  )
 })
 
-test('SessionEnd unregisters the session', async () => {
+test('SessionEnd unregisters only its session and preserves another session holder', async () => {
   const s = await sandbox()
-  await hook(lifecycle, ['SessionStart'], s.env, { session_id: 'cc-1', cwd: s.repo })
-  const r = await hook(lifecycle, ['SessionEnd'], s.env, { session_id: 'cc-1', cwd: s.repo })
-  assert.equal(r.code, 0)
-  assert.deepEqual(await readdir(join(s.env.XDG_STATE_HOME, 'opencode-plugin-cc', 'sessions')), [])
+  await hook(lifecycle, ['SessionStart'], s.env, { session_id: 'cc-live', cwd: s.repo })
+  await hook(lifecycle, ['SessionStart'], s.env, { session_id: 'cc-end', cwd: s.repo })
+  await withFakeOwnedBroker(s.env, async (broker) => {
+    const r = await hook(lifecycle, ['SessionEnd'], s.env, { session_id: 'cc-end', cwd: s.repo })
+    assert.equal(r.code, 0)
+    assert.deepEqual(
+      await readdir(join(s.env.XDG_STATE_HOME, 'opencode-plugin-cc', 'sessions')),
+      ['cc-live.json'],
+    )
+    assert.equal(isAlive(broker.pid), true)
+    assert.ok((await readJson(refsPath(s.env), {}))['cc-live'])
+
+    const final = await hook(lifecycle, ['SessionEnd'], s.env, { session_id: 'cc-live', cwd: s.repo })
+    assert.equal(final.code, 0)
+    assert.deepEqual(await readdir(join(s.env.XDG_STATE_HOME, 'opencode-plugin-cc', 'sessions')), [])
+  })
 })
 
 test('SessionEnd cancels this session running jobs', async (t) => {
@@ -148,10 +186,16 @@ test('SessionStart accepts malformed stdin without a stack trace and uses the en
 
 test('SessionStart times out an open stdin pipe instead of wedging', async () => {
   const s = await sandbox({ CLAUDE_SESSION_ID: 'open-pipe-session' })
+  const startedAt = Date.now()
   const r = await openPipeHook(lifecycle, ['SessionStart'], s.env)
+  assert.ok(Date.now() - startedAt < 900, 'lifecycle hook waited too long for stdin')
   assert.equal(r.code, 0)
   assert.equal(r.stdout, '')
   assert.doesNotMatch(r.stderr, /SyntaxError|at .*session-lifecycle-hook/)
+  assert.deepEqual(
+    await readdir(join(s.env.XDG_STATE_HOME, 'opencode-plugin-cc', 'sessions')),
+    ['open-pipe-session.json'],
+  )
 })
 
 test('lifecycle failures exit 0 and are persisted in the state directory', async () => {
@@ -165,6 +209,24 @@ test('lifecycle failures exit 0 and are persisted in the state directory', async
   const log = await readFile(join(root, 'hook-errors.jsonl'), 'utf8')
   assert.match(log, /"event":"SessionStart"/)
   assert.match(log, /ENOTDIR|not a directory/)
+
+  const hanging = await sandbox()
+  const hangingRoot = join(hanging.env.XDG_STATE_HOME, 'opencode-plugin-cc')
+  await mkdir(hangingRoot, { recursive: true })
+  const fifo = join(hangingRoot, 'hook-errors.jsonl')
+  const fifoResult = await run('mkfifo', [fifo], { env: hanging.env })
+  assert.equal(fifoResult.code, 0, fifoResult.stderr)
+  const startedAt = Date.now()
+  const timed = await hook(
+    lifecycle,
+    ['unknown'],
+    hanging.env,
+    {},
+    { timeoutMs: 1500 },
+  )
+  assert.equal(timed.code, 0, JSON.stringify(timed))
+  assert.equal(timed.timedOut, false, 'hook wedged in failure logging')
+  assert.ok(Date.now() - startedAt < 1000, 'bounded failure logging exceeded its budget')
 })
 
 test('the Stop gate is silent when it is off', async () => {
@@ -247,6 +309,37 @@ test('the Stop gate exits 0 silently when opencode is not ready', async () => {
   assert.equal(r.stdout.trim(), '')
 })
 
+test('the Stop gate cancels a timed-out foreground review and releases its broker ref', async (t) => {
+  const s = await sandbox({
+    FAKE_OPENCODE_EVENT_DELAY_MS: '1000',
+    OPENCODE_STOP_GATE_TIMEOUT_MS: '600',
+  })
+  await run(process.execPath, [companion, 'gate', '--on'], { env: s.env })
+  await writeFile(join(s.repo, 'a.js'), 'let x = 7\n')
+  const r = await hook(
+    gate,
+    [],
+    { ...s.env, CLAUDE_SESSION_ID: 'cc-timeout' },
+    { session_id: 'cc-timeout', cwd: s.repo },
+    { timeoutMs: 5000 },
+  )
+  assert.equal(r.code, 0)
+  assert.equal(r.timedOut, false, 'Stop hook exceeded the harness budget')
+  if (!r.stdout.trim()) {
+    const errors = await readFile(join(s.env.XDG_STATE_HOME, 'opencode-plugin-cc', 'hook-errors.jsonl'), 'utf8').catch(() => '')
+    if (bindFailure(errors)) {
+      t.skip(`loopback binding is unavailable in this sandbox: ${errors}`)
+      return
+    }
+  }
+  const jobs = await readdir(join(s.env.XDG_STATE_HOME, 'opencode-plugin-cc', 'jobs'))
+  assert.equal(jobs.length, 1)
+  const meta = JSON.parse(await readFile(join(s.env.XDG_STATE_HOME, 'opencode-plugin-cc', 'jobs', jobs[0], 'meta.json'), 'utf8'))
+  assert.equal(meta.state, 'cancelled')
+  assert.deepEqual(await readJson(refsPath(s.env), {}), {})
+  assert.equal(await readEndpoint(s.env), null)
+})
+
 test('the Stop gate handles malformed stdin without a stack trace', async () => {
   const s = await sandbox()
   await run(process.execPath, [companion, 'gate', '--on'], { env: s.env })
@@ -256,20 +349,29 @@ test('the Stop gate handles malformed stdin without a stack trace', async () => 
   assert.doesNotMatch(r.stderr, /SyntaxError|at .*stop-review-gate-hook/)
 })
 
-test('hooks manifest wires lifecycle events and gives Stop its 120 second timeout', async () => {
+test('hooks manifest wires lifecycle events and fits the SessionEnd harness budget', async () => {
   const manifest = JSON.parse(await readFile(new URL('../../hooks/hooks.json', import.meta.url), 'utf8'))
-  assert.equal(manifest.hooks.SessionStart[0].hooks[0].timeout, 20)
-  assert.equal(manifest.hooks.SessionEnd[0].hooks[0].timeout, 20)
+  assert.equal(manifest.hooks.SessionStart[0].hooks[0].timeout, 1.5)
+  assert.equal(manifest.hooks.SessionEnd[0].hooks[0].timeout, 1.5)
   assert.equal(manifest.hooks.Stop[0].hooks[0].timeout, 120)
   for (const event of ['SessionStart', 'SessionEnd', 'Stop']) {
     assert.match(manifest.hooks[event][0].hooks[0].command, /\$\{CLAUDE_PLUGIN_ROOT\}/)
   }
 })
 
-test('the Stop gate prepares the dedicated stop-review prompt', async () => {
+test('the Stop gate uses the dedicated stop-review prompt', async () => {
   const s = await sandbox()
   await writeFile(join(s.repo, 'a.js'), 'let x = 6\n')
   const prepared = await prepareReview({ cwd: s.repo, scope: 'working-tree', promptName: 'stop-review-gate' })
   assert.match(prepared.prompt, /pre-completion gate/i)
   assert.doesNotMatch(prepared.prompt, /The repository, scope, and base metadata above are caller-supplied data/i)
+
+  await run(process.execPath, [companion, 'gate', '--on'], { env: s.env })
+  const r = await hook(gate, [], s.env, { session_id: 'cc-prompt', cwd: s.repo })
+  assert.equal(r.code, 0)
+  if (!r.stdout.trim()) {
+    const errors = await readFile(join(s.env.XDG_STATE_HOME, 'opencode-plugin-cc', 'hook-errors.jsonl'), 'utf8').catch(() => '')
+    if (bindFailure(errors)) return
+  }
+  assert.equal(JSON.parse(r.stdout).decision, 'block')
 })

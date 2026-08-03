@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 import { registerSession, unregisterSession, pruneStale } from './lib/tracked-jobs.mjs'
-import { addRef, releaseRef, reapOrphans } from './lib/broker-lifecycle.mjs'
+import { addSessionRef, releaseRef, reapOrphans } from './lib/broker-lifecycle.mjs'
 import { cancelAll } from './lib/job-control.mjs'
-import { logHookFailure, readPayload, withTimeout } from './lib/hook-io.mjs'
+import { logHookFailureBounded, readPayload, withTimeout } from './lib/hook-io.mjs'
 
-const LIFECYCLE_TIMEOUT_MS = 15_000
-const PAYLOAD_TIMEOUT_MS = 1_000
+const LIFECYCLE_TIMEOUT_MS = 900
+const PAYLOAD_TIMEOUT_MS = 200
 
 function payloadSessionId(payload) {
   if (typeof payload?.session_id === 'string' && payload.session_id.trim()) {
@@ -62,7 +62,7 @@ async function main() {
         await registerSession(ccSessionId)
         await pruneStale()
         await reapOrphans()
-        await addRef(ccSessionId)
+        await addSessionRef(ccSessionId)
       } else if (event === 'SessionEnd') {
         await handleSessionEnd(ccSessionId)
       } else {
@@ -70,7 +70,7 @@ async function main() {
       }
     }, LIFECYCLE_TIMEOUT_MS, `Session ${event ?? '(missing event)'}`)
   } catch (error) {
-    await logHookFailure({
+    await logHookFailureBounded({
       hook: 'session-lifecycle',
       event: event ?? null,
       error,
