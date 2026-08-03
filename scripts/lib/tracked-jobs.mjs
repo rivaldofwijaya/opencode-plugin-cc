@@ -70,6 +70,12 @@ export async function updateJob(jobId, patch, env = process.env) {
   return next
 }
 
+export async function updateJobMeta(jobId, patch, env = process.env) {
+  const current = await readJob(jobId, env)
+  if (!current) throw new Error(`unknown job: ${jobId}`)
+  return updateJob(jobId, { meta: { ...(current.meta ?? {}), ...patch } }, env)
+}
+
 export async function listJobs(ccSessionId, env = process.env) {
   let ids
   try {

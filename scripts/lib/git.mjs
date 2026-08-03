@@ -257,23 +257,23 @@ async function untrackedSection(cwd, path) {
   try {
     file = await stat(join(cwd, path))
   } catch (error) {
-    if (error.code === 'ENOENT') return '(unreadable: ENOENT)\n'
+    if (error.code === 'ENOENT') return { text: '(unreadable: ENOENT)\n', truncated: true }
     throw error
   }
 
-  if (!file.isFile()) return '(not a regular file, omitted)\n'
-  if (file.size >= MAX_UNTRACKED_BYTES) return `(${file.size} bytes, omitted)\n`
+  if (!file.isFile()) return { text: '(not a regular file, omitted)\n', truncated: true }
+  if (file.size >= MAX_UNTRACKED_BYTES) return { text: `(${file.size} bytes, omitted)\n`, truncated: true }
 
   let contents
   try {
     contents = await readFile(join(cwd, path))
   } catch (error) {
-    if (error.code === 'ENOENT') return '(unreadable: ENOENT)\n'
+    if (error.code === 'ENOENT') return { text: '(unreadable: ENOENT)\n', truncated: true }
     throw error
   }
-  if (contents.byteLength >= MAX_UNTRACKED_BYTES) return `(${contents.byteLength} bytes, omitted)\n`
-  if (contents.includes(0)) return '(binary, omitted)\n'
-  return contents.toString('utf8')
+  if (contents.byteLength >= MAX_UNTRACKED_BYTES) return { text: `(${contents.byteLength} bytes, omitted)\n`, truncated: true }
+  if (contents.includes(0)) return { text: '(binary, omitted)\n', truncated: true }
+  return { text: contents.toString('utf8'), truncated: false }
 }
 
 function truncateUtf8(text, maxBytes) {
@@ -306,9 +306,13 @@ export async function collectDiff({
   env = process.env,
 } = {}) {
   let text = await trackedDiff(cwd, scope, base, env)
+  let truncated = false
   for (const path of await untrackedPaths(cwd, env)) {
     text += `\n--- untracked: ${path}\n`
-    text += await untrackedSection(cwd, path)
+    const section = await untrackedSection(cwd, path)
+    text += section.text
+    truncated ||= section.truncated
   }
-  return truncateUtf8(text, maxBytes)
+  const result = truncateUtf8(text, maxBytes)
+  return { text: result.text, truncated: truncated || result.truncated }
 }

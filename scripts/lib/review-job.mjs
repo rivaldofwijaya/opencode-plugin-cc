@@ -1,6 +1,7 @@
+import { randomBytes } from 'node:crypto'
 import { resolveScope, sizeChange, collectDiff, repoRoot } from './git.mjs'
 import { loadPrompt } from './prompts.mjs'
-import { readResult } from './tracked-jobs.mjs'
+import { readJob, readResult } from './tracked-jobs.mjs'
 import { parseReviewOutput } from './review-schema.mjs'
 import { renderReview } from './render.mjs'
 import { CompanionError } from './doctor.mjs'
@@ -22,11 +23,14 @@ export async function prepareReview({ cwd, scope = 'auto', base, adversarial = f
     )
   }
   const diff = await collectDiff({ cwd: root, scope: resolved.scope, base: resolved.base })
+  const nonce = randomBytes(16).toString('hex')
+  const openDelimiter = `<change-${nonce}>`
+  const closeDelimiter = `</change-${nonce}>`
   const vars = {
     CWD: root,
     SCOPE: resolved.scope,
     BASE_NOTE: resolved.base ? ` (against ${resolved.base})` : '',
-    DIFF: diff.text,
+    DIFF: `${openDelimiter}\n${diff.text}\n${closeDelimiter}`,
   }
   const prompt = adversarial
     ? await loadPrompt('adversarial-review', { ...vars, FOCUS: focus.trim() || '(none given)' })
@@ -35,7 +39,24 @@ export async function prepareReview({ cwd, scope = 'auto', base, adversarial = f
 }
 
 export async function finishReview({ jobId, env, scope, base, truncated }) {
+  return (await finishReviewResult({ jobId, env, scope, base, truncated })).rendered
+}
+
+export async function finishReviewResult({ jobId, env, scope, base, truncated }) {
   const text = await readResult(jobId, env)
+  const job = await readJob(jobId, env)
   const parsed = parseReviewOutput(text ?? '')
-  return renderReview(parsed, { scope, base, truncated, jobId })
+  const metadata = job?.meta ?? {}
+  const effectiveScope = scope ?? metadata.scope ?? 'working-tree'
+  const effectiveBase = base ?? metadata.base ?? null
+  const effectiveTruncated = truncated ?? metadata.truncated ?? false
+  return {
+    rendered: renderReview(parsed, {
+      scope: effectiveScope,
+      base: effectiveBase,
+      truncated: effectiveTruncated,
+      jobId,
+    }),
+    ok: parsed.ok,
+  }
 }

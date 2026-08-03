@@ -8,8 +8,8 @@ import { readGate, writeGate } from './lib/gate.mjs'
 import { resolveBinary } from './lib/opencode.mjs'
 import { run } from './lib/process.mjs'
 import { reapOrphans } from './lib/broker-lifecycle.mjs'
-import { pruneStale } from './lib/tracked-jobs.mjs'
-import { prepareReview, finishReview, REVIEW_AGENT, REVIEW_TOOLS } from './lib/review-job.mjs'
+import { pruneStale, updateJobMeta } from './lib/tracked-jobs.mjs'
+import { prepareReview, finishReviewResult, REVIEW_AGENT, REVIEW_TOOLS } from './lib/review-job.mjs'
 import { startJob, runForeground } from './lib/job-control.mjs'
 import { resolveScope, sizeChange, repoRoot } from './lib/git.mjs'
 
@@ -167,11 +167,18 @@ const handlers = {
   },
 
   'review-size': async ({ flags, cwd }) => {
+    if (flags.scope !== undefined && !['auto', 'working-tree', 'branch'].includes(flags.scope)) {
+      throw new CompanionError('invalid invocation: review-size --scope must be auto, working-tree, or branch', EXIT_CODES.INVALID_INVOCATION)
+    }
     const root = await repoRoot(cwd).catch(() => { throw new CompanionError(`not a git repository: ${cwd}`) })
-    const resolved = await resolveScope({ cwd: root, scope: flags.scope || 'auto', base: flags.base })
-    const size = await sizeChange({ cwd: root, scope: resolved.scope, base: resolved.base })
-    const payload = { scope: resolved.scope, base: resolved.base, ...size }
-    return { stdout: flags.json ? JSON.stringify(payload, null, 2) : JSON.stringify(payload), exitCode: EXIT_CODES.SUCCESS }
+    try {
+      const resolved = await resolveScope({ cwd: root, scope: flags.scope || 'auto', base: flags.base })
+      const size = await sizeChange({ cwd: root, scope: resolved.scope, base: resolved.base })
+      const payload = { scope: resolved.scope, base: resolved.base, ...size }
+      return { stdout: flags.json ? JSON.stringify(payload, null, 2) : JSON.stringify(payload), exitCode: EXIT_CODES.SUCCESS }
+    } catch (error) {
+      throw reviewGap(error)
+    }
   },
 
   review: (ctx) => reviewVerb(ctx, { adversarial: false }),
@@ -189,13 +196,18 @@ async function reviewVerb({ flags, positional, env, cwd, ccSessionId }, { advers
   const report = await runDoctor({ env, cwd, checkServer: false })
   requireReady(report)
 
-  const prep = await prepareReview({
-    cwd,
-    scope: flags.scope || 'auto',
-    base: flags.base,
-    adversarial,
-    focus: positional.join(' '),
-  })
+  let prep
+  try {
+    prep = await prepareReview({
+      cwd,
+      scope: flags.scope || 'auto',
+      base: flags.base,
+      adversarial,
+      focus: positional.join(' '),
+    })
+  } catch (error) {
+    throw reviewGap(error)
+  }
 
   const verb = adversarial ? 'adversarial-review' : 'review'
   const jobOpts = {
@@ -205,13 +217,18 @@ async function reviewVerb({ flags, positional, env, cwd, ccSessionId }, { advers
     agent: REVIEW_AGENT,
     tools: REVIEW_TOOLS,
     model: flags.model && flags.model !== true ? String(flags.model) : undefined,
-    variant: (flags.variant ?? flags.effort) && flags.variant !== true ? String(flags.variant ?? flags.effort) : undefined,
+    variant: flags.variant && flags.variant !== true ? String(flags.variant) : undefined,
     cwd: prep.root,
     env,
   }
 
   if (flags.background) {
     const { jobId } = await startJob({ ...jobOpts, background: true })
+    await updateJobMeta(jobId, {
+      scope: prep.scope,
+      base: prep.base,
+      truncated: prep.truncated,
+    }, env)
     return {
       stdout: `Started ${verb} as ${jobId}. Check it with /opencode:status, read it with /opencode:result ${jobId}.`,
       exitCode: EXIT_CODES.SUCCESS,
@@ -219,20 +236,21 @@ async function reviewVerb({ flags, positional, env, cwd, ccSessionId }, { advers
   }
 
   const settled = await runForeground(jobOpts)
-  const rendered = await finishReview({
+  const finished = await finishReviewResult({
     jobId: settled.id,
     env,
     scope: prep.scope,
     base: prep.base,
     truncated: prep.truncated,
   })
+  const rendered = finished.rendered
   if (settled.state === 'failed') {
     return { stdout: `${rendered}\n\nThe job ended in state "failed": ${settled.error ?? 'unknown error'}.`, exitCode: EXIT_CODES.GAP }
   }
   if (settled.state === 'cancelled') {
     return { stdout: `${rendered}\n\nThe job ended in state "cancelled": ${settled.error ?? 'unknown error'}.`, exitCode: EXIT_CODES.GAP }
   }
-  return { stdout: rendered, exitCode: EXIT_CODES.SUCCESS }
+  return { stdout: rendered, exitCode: reviewExitCode({ state: settled.state, reviewOk: finished.ok }) }
 }
 
 export const VERBS = Object.keys(handlers)
@@ -324,6 +342,22 @@ export const COMMAND_SPECS = Object.freeze({
 
 function errorDetail(error) {
   return error instanceof Error ? error.message : String(error)
+}
+
+const NO_BASE_CANDIDATE = 'no base candidate exists; pass --base'
+
+function reviewGap(error) {
+  if (error instanceof CompanionError) return error
+  const message = errorDetail(error)
+  if (message === NO_BASE_CANDIDATE || message.startsWith('git ') || error?.code === 'ENOENT') {
+    return new CompanionError(message, EXIT_CODES.GAP)
+  }
+  return error
+}
+
+export function reviewExitCode({ state, reviewOk }) {
+  if (state === 'failed' || state === 'cancelled' || !reviewOk) return EXIT_CODES.GAP
+  return EXIT_CODES.SUCCESS
 }
 
 const BINARY_FAILURE_CODES = new Set(['EACCES', 'EISDIR', 'ENOENT', 'ENOTDIR', 'EPERM'])
