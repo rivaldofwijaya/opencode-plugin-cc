@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 
 const TIMEOUT_KILL_GRACE_MS = 250
 const POLL_MS = 25
+export const TERMINATE_GRACE_MS = 3000
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -91,7 +92,7 @@ async function waitUntilGone(pid, deadline) {
   return true
 }
 
-export async function terminate(pid, { graceMs = 3000 } = {}) {
+export async function terminate(pid, { graceMs = TERMINATE_GRACE_MS } = {}) {
   if (!isAlive(pid)) return 'gone'
 
   try {
@@ -101,7 +102,7 @@ export async function terminate(pid, { graceMs = 3000 } = {}) {
     throw error
   }
 
-  const grace = timeoutValue(graceMs, 3000)
+  const grace = timeoutValue(graceMs, TERMINATE_GRACE_MS)
   if (await waitUntilGone(pid, Date.now() + grace)) return 'exited'
 
   try {

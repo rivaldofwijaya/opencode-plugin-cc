@@ -29,3 +29,15 @@ stored by opencode under
 - `scripts/lib/review-job.mjs` — review preparation and result finishing.
 - `scripts/lib/hook-io.mjs` — shared hook input/output helpers.
 - `tests/fixture-bin/opencode` — the test-only opencode executable shim.
+
+## Testing
+
+| Command | What it runs | Cost |
+|---|---|---|
+| `npm test` | Unit + integration against a fake opencode binary | free, no network |
+| `npm run test:isolated` | The real binary in a throwaway HOME with no credentials | free, no tokens |
+| `OPENCODE_LIVE=1 npm run test:live` | One review and one task against real credentials | spends tokens |
+
+`npm test` is the suite to run on every change. The isolated suite exercises the
+doctor ladder, `set-key`, and `set-model` against real opencode without touching
+your credentials. The live suite is opt-in.
