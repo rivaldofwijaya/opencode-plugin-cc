@@ -1,10 +1,34 @@
-export function parseArgs(argv, { includeFlagTokens = false } = {}) {
+function normalizeDefinition(definition) {
+  if (typeof definition === 'string') return { type: definition }
+  if (definition && typeof definition === 'object') return definition
+  return null
+}
+
+function definitionFor(spec, name) {
+  const definition = normalizeDefinition(spec?.flags?.[name])
+  if (definition) return definition
+  if (spec?.booleanFlags?.includes?.(name)) return { type: 'boolean' }
+  if (spec?.valueFlags?.includes?.(name)) return { type: 'value' }
+  return null
+}
+
+function commandSpecFor(options, verb) {
+  const direct = options.commandSpec ?? options.flagSpec
+  if (direct) return direct
+  if (options.flags || options.booleanFlags || options.valueFlags) return options
+  const specs = options.commandSpecs ?? options.specs ?? {}
+  return specs[verb] ?? null
+}
+
+export function parseArgs(argv, options = {}) {
+  const { includeFlagTokens = false } = options
   const flags = {}
   const positional = []
   const flagTokens = []
   let verb = null
   let i = 0
   if (argv[i] && !argv[i].startsWith('-')) verb = argv[i++]
+  const spec = commandSpecFor(options, verb)
   for (; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--') { positional.push(...argv.slice(i + 1)); break }
@@ -24,6 +48,24 @@ export function parseArgs(argv, { includeFlagTokens = false } = {}) {
         flagTokens.push({ raw: a, name, negated: true, value: false })
         continue
       }
+      const definition = definitionFor(spec, body)
+      if (definition?.type === 'boolean') {
+        flags[body] = true
+        flagTokens.push({ raw: a, name: body, negated: false, value: true })
+        continue
+      }
+      if (definition?.type === 'value') {
+        const next = argv[i + 1]
+        if (next !== undefined && next !== '--' && !next.startsWith('-')) {
+          flags[body] = next
+          flagTokens.push({ raw: a, name: body, negated: false, value: next })
+          i++
+        } else {
+          flags[body] = undefined
+          flagTokens.push({ raw: a, name: body, negated: false, value: undefined, missingValue: true })
+        }
+        continue
+      }
       const next = argv[i + 1]
       if (next !== undefined && !next.startsWith('-')) {
         flags[body] = next
@@ -37,6 +79,24 @@ export function parseArgs(argv, { includeFlagTokens = false } = {}) {
     }
     if (a.startsWith('-') && a.length > 1) {
       const key = a.slice(1)
+      const definition = definitionFor(spec, key)
+      if (definition?.type === 'boolean') {
+        flags[key] = true
+        flagTokens.push({ raw: a, name: key, negated: false, value: true })
+        continue
+      }
+      if (definition?.type === 'value') {
+        const next = argv[i + 1]
+        if (next !== undefined && next !== '--' && !next.startsWith('-')) {
+          flags[key] = next
+          flagTokens.push({ raw: a, name: key, negated: false, value: next })
+          i++
+        } else {
+          flags[key] = undefined
+          flagTokens.push({ raw: a, name: key, negated: false, value: undefined, missingValue: true })
+        }
+        continue
+      }
       const next = argv[i + 1]
       if (next !== undefined && !next.startsWith('-')) {
         flags[key] = next

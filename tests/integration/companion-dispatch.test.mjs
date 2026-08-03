@@ -5,11 +5,22 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { run } from '../../scripts/lib/process.mjs'
-import { main, handlers } from '../../scripts/opencode-companion.mjs'
+import { parseArgs } from '../../scripts/lib/args.mjs'
+import { main, handlers, validateInvocation } from '../../scripts/opencode-companion.mjs'
 
 const companion = fileURLToPath(new URL('../../scripts/opencode-companion.mjs', import.meta.url))
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
 const bindFailure = (detail) => /EACCES|EPERM|EADDRNOTAVAIL|loopback|listen/i.test(String(detail))
+const parserSpecs = {
+  review: {
+    flags: {
+      background: { type: 'boolean' },
+      base: { type: 'value' },
+      flag: { type: 'value' },
+    },
+    maxPositionals: 10,
+  },
+}
 
 async function env(extra = {}) {
   const home = await mkdtemp(join(tmpdir(), 'occli-'))
@@ -76,6 +87,42 @@ test('doctor rejects an unexpected positional argument', async () => {
   assert.equal(r.code, 2)
   assert.match(r.stderr, /unexpected positional argument "whatever"/)
   assert.equal(r.stdout, '')
+})
+
+test('a declared boolean flag leaves the following prompt as positional text', () => {
+  const r = parseArgs(['review', '--background', 'prompt', 'text'], {
+    commandSpecs: parserSpecs,
+    includeFlagTokens: true,
+  })
+  assert.deepEqual(r.flags, { background: true })
+  assert.deepEqual(r.positional, ['prompt', 'text'])
+  assert.deepEqual(r.flagTokens, [{ raw: '--background', name: 'background', negated: false, value: true }])
+})
+
+test('a declared value flag consumes its value and supports equals form', () => {
+  const r = parseArgs(['review', '--base', 'main', '--flag=value'], {
+    commandSpecs: parserSpecs,
+    includeFlagTokens: true,
+  })
+  assert.deepEqual(r.flags, { base: 'main', flag: 'value' })
+  assert.deepEqual(r.positional, [])
+})
+
+test('a declared value flag without a value is a clear invocation error', () => {
+  const parsed = parseArgs(['review', '--base'], {
+    commandSpecs: parserSpecs,
+    includeFlagTokens: true,
+  })
+  assert.throws(
+    () => validateInvocation({ ...parsed, commandSpec: parserSpecs.review }),
+    /flag --base for review requires a value/,
+  )
+})
+
+test('double dash preserves a positional that begins with a dash', () => {
+  const r = parseArgs(['review', '--', '--looks-like-a-flag'], { commandSpecs: parserSpecs })
+  assert.deepEqual(r.positional, ['--looks-like-a-flag'])
+  assert.deepEqual(r.flags, {})
 })
 
 test('a missing handler result is a crash, not silent success', async () => {
