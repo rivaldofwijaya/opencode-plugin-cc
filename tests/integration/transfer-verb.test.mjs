@@ -6,9 +6,19 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { run } from '../../scripts/lib/process.mjs'
 import { readEndpoint } from '../../scripts/lib/broker-endpoint.mjs'
+import { readJson, sessionsDir } from '../../scripts/lib/state.mjs'
+import { rememberOpencodeSession } from '../../scripts/lib/tracked-jobs.mjs'
+import { handlers } from '../../scripts/opencode-companion.mjs'
 
 const companion = fileURLToPath(new URL('../../scripts/opencode-companion.mjs', import.meta.url))
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
+
+async function persistedSession(s) {
+  return readJson(
+    join(sessionsDir(s.env), `${encodeURIComponent(s.env.CLAUDE_SESSION_ID)}.json`),
+    null,
+  )
+}
 
 async function sandbox() {
   const home = await mkdtemp(join(tmpdir(), 'octrans-'))
@@ -24,7 +34,7 @@ async function sandbox() {
     XDG_DATA_HOME: join(home, 'data'),
     XDG_CONFIG_HOME: join(home, 'config'),
     OPENCODE_BIN: fixture,
-    CLAUDE_SESSION_ID: 'cc-transfer',
+    CLAUDE_SESSION_ID: 'cc-face',
     CLAUDE_TRANSCRIPT_PATH: transcript,
   }
   await mkdir(join(env.XDG_DATA_HOME, 'opencode'), { recursive: true })
@@ -35,9 +45,43 @@ async function sandbox() {
 }
 
 function skipBindFailure(t, result) {
-  if (result.code !== 1 || !/EACCES|EPERM|EADDRNOTAVAIL|loopback|listen/i.test(result.stderr)) return false
+  if (!isBindFailure(result)) return false
   t.skip(`loopback binding is unavailable in this sandbox: ${result.stderr}`)
   return true
+}
+
+function isBindFailure(result) {
+  return result.code === 1 && /EACCES|EPERM|EADDRNOTAVAIL|loopback|listen/i.test(result.stderr)
+}
+
+async function stubbedPartialTransfer(s) {
+  try {
+    await handlers.transfer({
+      flags: {},
+      env: s.env,
+      cwd: s.home,
+      ccSessionId: s.env.CLAUDE_SESSION_ID,
+      runDoctorFn: async () => ({
+        binary: { ok: true },
+        version: { ok: true },
+        auth: { ok: true },
+        model: { ok: true },
+        gaps: [],
+      }),
+      addRefFn: async () => {},
+      releaseRefFn: async () => {},
+      ensureBrokerFn: async () => ({
+        client: {
+          createSession: async () => ({ id: 'ses_stub' }),
+          promptAsync: async () => {},
+        },
+      }),
+      rememberOpencodeSessionFn: rememberOpencodeSession,
+    })
+    assert.fail('stubbed partial transfer unexpectedly succeeded')
+  } catch (error) {
+    return error
+  }
 }
 
 test('transfer writes a handoff, creates a session, and prints the resume command', async (t) => {
@@ -54,7 +98,20 @@ test('transfer writes a handoff, creates a session, and prints the resume comman
   assert.match(handoff, /lib\/parse\.js/)
   assert.match(r.stdout, /one-way/i)
   assert.match(r.stdout, /no secret redaction/i)
+  const record = await persistedSession(s)
+  assert.equal(record?.ccSessionId, s.env.CLAUDE_SESSION_ID)
+  assert.equal(record?.lastOpencodeSession, sessionMatch[1])
   assert.equal(await readEndpoint(s.env), null)
+})
+
+test('transfer refuses an unsafe Claude Code session id before discovery or setup', async () => {
+  const s = await sandbox()
+  const env = { ...s.env, CLAUDE_SESSION_ID: '../outside' }
+  const r = await run(process.execPath, [companion, 'transfer'], { env, cwd: s.home, timeoutMs: 60000 })
+  assert.equal(r.code, 2)
+  assert.match(r.stderr, /invalid Claude Code session id/i)
+  assert.equal(r.stdout, '')
+  assert.equal(await persistedSession({ ...s, env }), null)
 })
 
 test('transfer --out writes to the requested path', async (t) => {
@@ -64,6 +121,9 @@ test('transfer --out writes to the requested path', async (t) => {
   if (skipBindFailure(t, r)) return
   assert.equal(r.code, 0, r.stderr)
   assert.match(await readFile(out, 'utf8'), /port the parser/)
+  const record = await persistedSession(s)
+  assert.equal(record?.ccSessionId, s.env.CLAUDE_SESSION_ID)
+  assert.match(record?.lastOpencodeSession ?? '', /^ses_/)
   assert.equal(await readEndpoint(s.env), null)
 })
 
@@ -75,23 +135,46 @@ test('transfer without a findable transcript still produces a handoff and says s
   assert.equal(r.code, 0, r.stderr)
   assert.match(r.stdout, /could not be located/i)
   assert.match(r.stdout, /ses_/)
+  const record = await persistedSession({ ...s, env })
+  assert.equal(record?.ccSessionId, env.CLAUDE_SESSION_ID)
+  assert.match(record?.lastOpencodeSession ?? '', /^ses_/)
   assert.equal(await readEndpoint(env), null)
 })
 
-test('transfer reports a malformed transcript as a partial gap and keeps valid context', async (t) => {
+test('transfer reports a malformed transcript as a partial gap and keeps valid context', async () => {
   const s = await sandbox()
   await writeFile(s.transcript, [
     'not json',
     JSON.stringify({ type: 'user', message: { role: 'user', content: 'keep this turn' } }),
   ].join('\n'))
   const r = await run(process.execPath, [companion, 'transfer'], { env: s.env, cwd: s.home, timeoutMs: 60000 })
-  if (skipBindFailure(t, r)) return
+  if (isBindFailure(r)) {
+    const error = await stubbedPartialTransfer(s)
+    assert.equal(error?.exitCode, 1)
+    assert.match(error?.message ?? '', /malformed|partial/i)
+    assert.match(error?.message ?? '', /keep valid context|handoff/i)
+    const handoffPath = error?.message.match(/Handoff written to (\S+\.md)/)?.[1]
+    assert.ok(handoffPath, error?.message)
+    assert.match(await readFile(handoffPath, 'utf8'), /keep this turn/)
+    const sessionMatch = error?.message.match(/Seeded opencode session: (ses_\S+?)(?:\.|$)/)
+    assert.ok(sessionMatch, error?.message)
+    const record = await persistedSession(s)
+    assert.equal(record?.ccSessionId, s.env.CLAUDE_SESSION_ID)
+    assert.equal(record?.lastOpencodeSession, sessionMatch[1])
+    assert.equal(await readEndpoint(s.env), null)
+    return
+  }
   assert.equal(r.code, 1)
   assert.match(r.stderr, /malformed|partial/i)
   assert.match(r.stderr, /keep valid context|handoff/i)
   const handoffPath = r.stderr.match(/Handoff written to (\S+\.md)/)?.[1]
   assert.ok(handoffPath, r.stderr)
   assert.match(await readFile(handoffPath, 'utf8'), /keep this turn/)
+  const sessionMatch = r.stderr.match(/Seeded opencode session: (ses_\S+?)(?:\.|$)/)
+  assert.ok(sessionMatch, r.stderr)
+  const record = await persistedSession(s)
+  assert.equal(record?.ccSessionId, s.env.CLAUDE_SESSION_ID)
+  assert.equal(record?.lastOpencodeSession, sessionMatch[1])
   assert.equal(await readEndpoint(s.env), null)
 })
 
@@ -103,6 +186,7 @@ test('transfer refuses an unreadable transcript and does not create a session', 
   assert.match(r.stderr, /could not read|unreadable|EISDIR/i)
   assert.match(r.stderr, /Handoff metadata written to \S+\.md/)
   assert.doesNotMatch(r.stdout, /opencode --session/)
+  assert.equal(await persistedSession({ ...s, env }), null)
   assert.equal(await readEndpoint(env), null)
 })
 
@@ -114,5 +198,6 @@ test('transfer refuses an empty transcript with a distinct gap', async () => {
   assert.match(r.stderr, /empty|no conversation content/i)
   assert.match(r.stderr, /Handoff written to \S+\.md/)
   assert.doesNotMatch(r.stdout, /opencode --session/)
+  assert.equal(await persistedSession(s), null)
   assert.equal(await readEndpoint(s.env), null)
 })
