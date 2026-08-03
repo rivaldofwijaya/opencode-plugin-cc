@@ -16,8 +16,16 @@ import {
   updateJob,
   updateJobMeta,
   writeResult,
+  jobLockPath,
 } from '../../scripts/lib/tracked-jobs.mjs'
-import { readEndpoint, refsPath } from '../../scripts/lib/broker-endpoint.mjs'
+import {
+  acquireLock,
+  acquireLockAt,
+  readEndpoint,
+  refsPath,
+  releaseLock,
+  releaseLockAt,
+} from '../../scripts/lib/broker-endpoint.mjs'
 import { jobDir, readJson } from '../../scripts/lib/state.mjs'
 
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
@@ -205,6 +213,82 @@ test('concurrent terminal and metadata updates preserve both fields', async () =
   const final = await readJob(job.id, env)
   assert.equal(final.state, 'done')
   assert.equal(final.meta.truncated, true)
+})
+
+test('different job record locks do not serialize writes', async () => {
+  const env = await sandbox()
+  const first = await createJob({
+    ccSessionId: 'cc-independent-records',
+    verb: 'review',
+    cwd: repoCwd,
+    background: true,
+  }, env)
+  const second = await createJob({
+    ccSessionId: 'cc-independent-records',
+    verb: 'review',
+    cwd: repoCwd,
+    background: true,
+  }, env)
+  const firstLock = jobLockPath(first.id, env)
+  assert.equal(await acquireLockAt(firstLock), true)
+
+  let firstSettled = false
+  const firstUpdate = updateJob(first.id, { state: 'done', endedAt: Date.now() }, env)
+    .then((value) => {
+      firstSettled = true
+      return value
+    }, (error) => {
+      firstSettled = true
+      throw error
+    })
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    assert.equal(firstSettled, false)
+    const secondFinished = await Promise.race([
+      updateJobMeta(second.id, { truncated: true }, env).then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 500)),
+    ])
+    assert.equal(secondFinished, true)
+    assert.equal(firstSettled, false)
+  } finally {
+    await releaseLockAt(firstLock)
+  }
+
+  await firstUpdate
+  assert.equal((await readJob(first.id, env)).state, 'done')
+  assert.equal((await readJob(second.id, env)).meta.truncated, true)
+})
+
+test('a job record write is independent of the broker lock', async () => {
+  const env = await sandbox()
+  const job = await createJob({
+    ccSessionId: 'cc-broker-lock-independent',
+    verb: 'review',
+    cwd: repoCwd,
+    background: true,
+  }, env)
+  assert.equal(await acquireLock(env), true)
+  try {
+    await updateJob(job.id, { state: 'done', endedAt: Date.now() }, env)
+  } finally {
+    await releaseLock(env)
+  }
+  assert.equal((await readJob(job.id, env)).state, 'done')
+})
+
+test('a stale job record lock is reclaimed', async () => {
+  const env = await sandbox()
+  const job = await createJob({
+    ccSessionId: 'cc-stale-record-lock',
+    verb: 'review',
+    cwd: repoCwd,
+    background: true,
+  }, env)
+  await writeFile(jobLockPath(job.id, env), JSON.stringify({ pid: 2 ** 22, at: Date.now() }))
+
+  await updateJob(job.id, { state: 'done', endedAt: Date.now() }, env)
+  assert.equal((await readJob(job.id, env)).state, 'done')
 })
 
 test('cancelJob aborts a running foreground job', async (t) => {

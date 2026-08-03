@@ -42,10 +42,10 @@ export async function clearEndpoint(env = process.env) {
   await unlinkIfMissing(lockPath(env))
 }
 
-async function readLock(env) {
+async function readLock(path) {
   let text
   try {
-    text = await readFile(lockPath(env), 'utf8')
+    text = await readFile(path, 'utf8')
   } catch (error) {
     if (error.code === 'ENOENT') return null
     throw error
@@ -58,18 +58,17 @@ async function readLock(env) {
   }
 }
 
-async function lockIsStale(env) {
-  const lock = await readLock(env)
+async function lockIsStale(path) {
+  const lock = await readLock(path)
   if (!lock) return true
   if (!lock.record || typeof lock.record !== 'object') return true
   if (lock.record.pid && !isAlive(lock.record.pid)) return true
   return Date.now() - (lock.record.at || 0) > STALE_LOCK_MS
 }
 
-async function removeStaleLock(env) {
-  const path = lockPath(env)
-  const observed = await readLock(env)
-  if (!observed || !await lockIsStale(env)) return false
+async function removeStaleLock(path) {
+  const observed = await readLock(path)
+  if (!observed || !await lockIsStale(path)) return false
 
   const quarantine = `${path}.stale-${process.pid}-${randomBytes(6).toString('hex')}`
   try {
@@ -103,15 +102,14 @@ async function removeStaleLock(env) {
   return true
 }
 
-export async function acquireLock(env = process.env) {
-  await ensurePrivateBrokerDir(env)
+export async function acquireLockAt(path) {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const handle = await open(lockPath(env), 'wx', 0o600)
+      const handle = await open(path, 'wx', 0o600)
       try {
         await handle.writeFile(JSON.stringify({ pid: process.pid, at: Date.now() }))
       } catch (error) {
-        await unlinkIfMissing(lockPath(env))
+        await unlinkIfMissing(path)
         throw error
       } finally {
         await handle.close()
@@ -119,13 +117,22 @@ export async function acquireLock(env = process.env) {
       return true
     } catch (error) {
       if (error.code !== 'EEXIST') throw error
-      if (attempt === 0 && await removeStaleLock(env)) continue
+      if (attempt === 0 && await removeStaleLock(path)) continue
       return false
     }
   }
   return false
 }
 
+export async function releaseLockAt(path) {
+  await unlinkIfMissing(path)
+}
+
+export async function acquireLock(env = process.env) {
+  await ensurePrivateBrokerDir(env)
+  return acquireLockAt(lockPath(env))
+}
+
 export async function releaseLock(env = process.env) {
-  await unlinkIfMissing(lockPath(env))
+  return releaseLockAt(lockPath(env))
 }
