@@ -83,6 +83,12 @@ if (fault === 'nonzero-exit') {
   process.stderr.write('fake opencode failed\n')
   process.exit(3)
 }
+if (fault === 'partial-then-fail') {
+  const partial = (process.env.FAKE_OPENCODE_MODELS || 'stale/model').split(',')[0].trim()
+  process.stdout.write(partial)
+  process.stderr.write('fake opencode failed\n')
+  process.exit(3)
+}
 
 if (argv.includes('--version')) {
   process.stdout.write((fault === 'old-version' ? '1.17.0' : version) + '\n')

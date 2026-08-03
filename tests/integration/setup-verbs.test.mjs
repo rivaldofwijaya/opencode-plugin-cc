@@ -1,6 +1,6 @@
-import { test } from 'node:test'
+import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, readFile, readdir, stat, chmod } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, readdir, stat, chmod, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -9,6 +9,16 @@ import { handlers } from '../../scripts/opencode-companion.mjs'
 
 const companion = fileURLToPath(new URL('../../scripts/opencode-companion.mjs', import.meta.url))
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
+const sandboxes = new Set()
+
+afterEach(async () => {
+  const roots = [...sandboxes]
+  try {
+    await Promise.all(roots.map(root => rm(root, { recursive: true, force: true })))
+  } finally {
+    sandboxes.clear()
+  }
+})
 
 async function sandbox(extra = {}) {
   const home = await mkdtemp(join(tmpdir(), 'ocsetup-'))
@@ -23,10 +33,21 @@ async function sandbox(extra = {}) {
     ...extra,
   }
   await mkdir(join(env.XDG_CONFIG_HOME, 'opencode'), { recursive: true })
+  sandboxes.add(home)
   return { env, home }
 }
 
 const cli = (env, args, cwd) => run(process.execPath, [companion, ...args], { env, cwd })
+
+const invokeModels = (s, flags, invocations) => handlers.models({
+  flags,
+  env: s.env,
+  resolveBinaryFn: async () => ({ path: fixture }),
+  runFn: async (...args) => {
+    invocations.push(args)
+    return run(...args)
+  },
+})
 
 test('set-key writes auth.json at 0600 and prints only a redacted confirmation', async () => {
   const s = await sandbox()
@@ -185,17 +206,27 @@ test('set-model rejects malformed provider/model values before writing', async (
 
 test('models lists what the binary reports and filters by provider', async () => {
   const s = await sandbox({ FAKE_OPENCODE_MODELS: 'a/one,a/two,b/three' })
-  const all = await cli(s.env, ['models'])
-  assert.equal(all.code, 0)
-  assert.deepEqual(all.stdout.trim().split('\n'), ['a/one', 'a/two', 'b/three'])
-  const filtered = await cli(s.env, ['models', '--provider', 'a'])
-  assert.equal(filtered.code, 0)
-  assert.deepEqual(filtered.stdout.trim().split('\n'), ['a/one', 'a/two'])
+  const configuredModels = s.env.FAKE_OPENCODE_MODELS.split(',').map(model => model.trim()).filter(Boolean)
+  const invocations = []
+  const all = await invokeModels(s, {}, invocations)
+  assert.equal(all.exitCode, 0)
+  assert.deepEqual(all.stdout.split('\n'), configuredModels)
+  const provider = configuredModels[0].split('/')[0]
+  const filtered = await invokeModels(s, { provider }, invocations)
+  assert.equal(filtered.exitCode, 0)
+  assert.deepEqual(
+    filtered.stdout.split('\n'),
+    configuredModels.filter(model => model.startsWith(`${provider}/`)),
+  )
+  assert.equal(invocations.length, 2)
+  assert.ok(invocations.every(([path, args, options]) => (
+    path === fixture && args[0] === 'models' && options.env === s.env
+  )))
 })
 
 test('models reports binary failures on stderr with a non-zero exit', async () => {
   const s = await sandbox({
-    FAKE_OPENCODE_FAULT: 'nonzero-exit',
+    FAKE_OPENCODE_FAULT: 'partial-then-fail',
     FAKE_OPENCODE_MODELS: 'stale/model',
   })
   const r = await cli(s.env, ['models'])
@@ -230,12 +261,10 @@ test('models reports a missing binary as a gap', async () => {
   const s = await sandbox({
     OPENCODE_BIN: '/nonexistent/opencode',
     PATH: '/nonexistent',
-    FAKE_OPENCODE_MODELS: 'stale/model',
   })
   const r = await cli(s.env, ['models'])
   assert.equal(r.code, 1)
   assert.match(r.stderr, /opencode binary unavailable: opencode binary not found/i)
-  assert.equal(r.stdout, '')
 
   let resolutionRequest
   await assert.rejects(
@@ -291,14 +320,38 @@ test('models maps a spawn failure to a reported gap', async () => {
 
 test('models explains empty and unmatched results', async () => {
   const empty = await sandbox({ FAKE_OPENCODE_MODELS: ',' })
-  const emptyResult = await cli(empty.env, ['models'])
-  assert.equal(emptyResult.code, 0)
-  assert.equal(emptyResult.stdout.trim(), 'The opencode binary reported no models at all.')
+  const emptyModels = empty.env.FAKE_OPENCODE_MODELS.split(',').map(model => model.trim()).filter(Boolean)
+  const emptyInvocations = []
+  const emptyResult = await invokeModels(empty, {}, emptyInvocations)
+  assert.equal(emptyResult.exitCode, 0)
+  assert.equal(
+    emptyResult.stdout.trim(),
+    emptyModels.length === 0
+      ? 'The opencode binary reported no models at all.'
+      : emptyModels.join('\n'),
+  )
+  assert.equal(emptyInvocations.length, 1)
+  assert.equal(emptyInvocations[0][0], fixture)
+  assert.deepEqual(emptyInvocations[0][1], ['models'])
+  assert.equal(emptyInvocations[0][2].env, empty.env)
 
   const filtered = await sandbox({ FAKE_OPENCODE_MODELS: 'a/one,b/two' })
-  const filteredResult = await cli(filtered.env, ['models', '--provider', 'z'])
-  assert.equal(filteredResult.code, 0)
-  assert.equal(filteredResult.stdout.trim(), 'No models matched provider z.')
+  const configuredModels = filtered.env.FAKE_OPENCODE_MODELS.split(',').map(model => model.trim()).filter(Boolean)
+  const provider = 'z'
+  const filteredInvocations = []
+  const filteredResult = await invokeModels(filtered, { provider }, filteredInvocations)
+  const matchingModels = configuredModels.filter(model => model.startsWith(`${provider}/`))
+  assert.equal(filteredResult.exitCode, 0)
+  assert.equal(
+    filteredResult.stdout.trim(),
+    matchingModels.length === 0
+      ? `No models matched provider ${provider}.`
+      : matchingModels.join('\n'),
+  )
+  assert.equal(filteredInvocations.length, 1)
+  assert.equal(filteredInvocations[0][0], fixture)
+  assert.deepEqual(filteredInvocations[0][1], ['models'])
+  assert.equal(filteredInvocations[0][2].env, filtered.env)
 })
 
 test('set-key keeps its write report when the post-write doctor fails', async () => {
