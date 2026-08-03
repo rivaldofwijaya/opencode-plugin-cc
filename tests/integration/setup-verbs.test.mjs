@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, readFile, stat } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, readdir, stat, chmod } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -62,13 +62,60 @@ test('set-key without a key reports invalid invocation with a clear message', as
 })
 
 test('set-key reports a sanitized underlying filesystem error code', async () => {
+  const control = await sandbox()
+  const controlKey = 'sk-or-control-2468'
+  const controlResult = await cli(control.env, [
+    'set-key', '--provider', 'control-provider', '--key', controlKey,
+  ])
+  assert.equal(controlResult.code, 0)
+  assert.equal(
+    JSON.parse(await readFile(join(control.env.XDG_DATA_HOME, 'opencode', 'auth.json')))
+      ['control-provider'].key,
+    controlKey,
+  )
+
   const s = await sandbox()
-  await mkdir(join(s.env.XDG_DATA_HOME, 'opencode'), { recursive: true })
-  await mkdir(join(s.env.XDG_DATA_HOME, 'opencode', 'auth.json'))
+  const dataDir = join(s.env.XDG_DATA_HOME, 'opencode')
+  const auth = join(dataDir, 'auth.json')
+  await mkdir(dataDir, { recursive: true })
+  await mkdir(auth)
+  const before = await stat(auth)
+  const beforeEntries = await readdir(auth)
   const r = await cli(s.env, ['set-key', '--provider', 'openrouter', '--key', 'sk-or-neverprint'])
   assert.equal(r.code, 1)
   assert.equal(r.stderr.trim(), 'set-key failed (EISDIR)')
+  assert.equal(r.stdout.includes('sk-or-neverprint'), false)
   assert.equal(r.stderr.includes('sk-or-neverprint'), false)
+  const after = await stat(auth)
+  assert.equal(after.isDirectory(), true)
+  assert.equal(after.mode & 0o777, before.mode & 0o777)
+  assert.deepEqual(await readdir(auth), beforeEntries)
+  await assert.rejects(() => stat(auth + '.bak'), { code: 'ENOENT' })
+  assert.deepEqual(await readdir(dataDir), ['auth.json'])
+
+  const existing = await sandbox()
+  const existingDataDir = join(existing.env.XDG_DATA_HOME, 'opencode')
+  const existingAuth = join(existingDataDir, 'auth.json')
+  const existingBackup = existingAuth + '.bak'
+  const original = '{"anthropic":{"type":"api","key":"KEEP"}}\n'
+  await mkdir(existingDataDir, { recursive: true })
+  await writeFile(existingAuth, original)
+  await chmod(existingAuth, 0o640)
+  await mkdir(existingBackup)
+  const existingBefore = await stat(existingAuth)
+  const backupBefore = await stat(existingBackup)
+  const existingResult = await cli(existing.env, [
+    'set-key', '--provider', 'openrouter', '--key', 'sk-or-existing-neverprint',
+  ])
+  assert.equal(existingResult.code, 1)
+  assert.equal(existingResult.stderr.trim(), 'set-key failed (EISDIR)')
+  assert.equal(existingResult.stdout.includes('sk-or-existing-neverprint'), false)
+  assert.equal(existingResult.stderr.includes('sk-or-existing-neverprint'), false)
+  assert.equal(await readFile(existingAuth, 'utf8'), original)
+  assert.equal((await stat(existingAuth)).mode & 0o777, existingBefore.mode & 0o777)
+  assert.equal((await stat(existingBackup)).isDirectory(), true)
+  assert.equal((await stat(existingBackup)).mode & 0o777, backupBefore.mode & 0o777)
+  assert.deepEqual(await readdir(existingDataDir), ['auth.json', 'auth.json.bak'])
 })
 
 test('set-model merges into the existing global .jsonc, reports comments dropped, and re-runs doctor', async () => {
@@ -218,10 +265,20 @@ test('set-model keeps its write report when the post-write doctor fails', async 
 
 test('the gate is off by default, toggles, and status is exactly bare on/off', async () => {
   const s = await sandbox()
-  assert.equal((await cli(s.env, ['gate', '--status'])).stdout, 'off\n')
-  await cli(s.env, ['gate', '--on'])
+  const initial = await cli(s.env, ['gate', '--status'])
+  assert.equal(initial.code, 0)
+  assert.equal(initial.stdout, 'off\n')
+  const firstOn = await cli(s.env, ['gate', '--on'])
+  assert.equal(firstOn.code, 0)
   assert.equal((await cli(s.env, ['gate', '--status'])).stdout, 'on\n')
-  await cli(s.env, ['gate', '--off'])
+  const repeatedOn = await cli(s.env, ['gate', '--on'])
+  assert.equal(repeatedOn.code, 0)
+  assert.equal((await cli(s.env, ['gate', '--status'])).stdout, 'on\n')
+  const firstOff = await cli(s.env, ['gate', '--off'])
+  assert.equal(firstOff.code, 0)
+  assert.equal((await cli(s.env, ['gate', '--status'])).stdout, 'off\n')
+  const repeatedOff = await cli(s.env, ['gate', '--off'])
+  assert.equal(repeatedOff.code, 0)
   assert.equal((await cli(s.env, ['gate', '--status'])).stdout, 'off\n')
 })
 
