@@ -8,14 +8,31 @@ export function formatElapsed(ms) {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
 }
 
-function formatJobTime(job) {
+export function formatJobStart(job) {
   const started = Number.isFinite(job?.startedAt) && job.startedAt > 0
     ? `started ${new Date(job.startedAt).toISOString()}`
     : null
+  return started
+}
+
+function formatJobEnd(job) {
   const ended = Number.isFinite(job?.endedAt) && job.endedAt > 0
     ? `ended ${new Date(job.endedAt).toISOString()}`
     : null
-  return [started, ended].filter(Boolean).join('; ')
+  return ended
+}
+
+function formatJobTime(job) {
+  return [formatJobStart(job), formatJobEnd(job)].filter(Boolean).join('; ')
+}
+
+export function formatJobTarget(job) {
+  const target = [`cwd=${job?.cwd || '(unknown)'}`]
+  if (job?.verb === 'review' || job?.verb === 'adversarial-review') {
+    target.push(`scope=${job?.meta?.scope ?? 'unknown'}`)
+    target.push(`base=${job?.meta?.base ?? 'none'}`)
+  }
+  return target.join('; ')
 }
 
 function stateNotice(job) {
@@ -107,7 +124,8 @@ export function renderJobList(jobs, now = Date.now()) {
         : null,
     ].filter(Boolean).join(', ')
     const when = formatJobTime(job)
-    lines.push(`  ${job.id}  ${job.verb.padEnd(16)} ${job.state.padEnd(9)} ${elapsed.padStart(7)}${counterText ? `  ${counterText}` : ''}${when ? `  (${when})` : ''}`)
+    const target = formatJobTarget(job)
+    lines.push(`  ${job.id}  ${job.verb.padEnd(16)} ${job.state.padEnd(9)} ${elapsed.padStart(7)}${counterText ? `  ${counterText}` : ''}${when ? `  (${when})` : ''}  [${target}]`)
     if (job.error) lines.push(`      error: ${job.error}`)
   }
   return lines.join('\n')
@@ -118,6 +136,7 @@ export function renderJobResult(job, resultText, { formatted = false } = {}) {
   const head = `opencode ${job.verb} ${job.id} — ${job.state}${when ? ` (${when})` : ''}`
   const context = [
     head,
+    `Target: ${formatJobTarget(job)}`,
     truncationNotice(job, formatted),
     stateNotice(job),
     job.error ? `Error: ${job.error}` : null,

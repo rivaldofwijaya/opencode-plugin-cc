@@ -428,16 +428,21 @@ export async function runForeground(opts) {
   return done
 }
 
-export async function cancelJob(jobId, env = process.env) {
+export async function cancelJob(jobId, env = process.env, { ensureBrokerFn = ensureBroker } = {}) {
   const job = await readJob(jobId, env)
   if (!job) return 'unknown'
   if (job.state !== 'running') return 'already-finished'
 
   await updateJob(jobId, { state: 'cancelled', endedAt: Date.now() }, env)
   const workerToken = await ownedWorkerToken(job, env)
-  if (job.sessionID) {
+  // Foreground ownership is proven by this process's PID. Background jobs
+  // need the worker-owner record, a live PID, and a matching command line.
+  // If neither proof is available, durable cancellation remains authoritative
+  // and no broker session is signalled because it may belong to another job.
+  const ownsExecution = job.pid === process.pid || Boolean(workerToken)
+  if (job.sessionID && ownsExecution) {
     try {
-      const broker = await ensureBroker({ env })
+      const broker = await ensureBrokerFn({ env })
       await broker.client.abort(job.sessionID)
     } catch {
       // The durable cancellation record is authoritative if the broker is gone.
