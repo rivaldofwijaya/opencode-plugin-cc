@@ -13,10 +13,10 @@ import {
 } from './state.mjs'
 import { atomicWrite } from './fs.mjs'
 import { isAlive } from './process.mjs'
-import { acquireLock, releaseLock } from './broker-endpoint.mjs'
+import { acquireLockAt, releaseLockAt } from './broker-endpoint.mjs'
 
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
-const RECORD_LOCK_TIMEOUT_MS = 20_000
+const RECORD_LOCK_TIMEOUT_MS = 2_000
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -66,23 +66,29 @@ export const readJob = (jobId, env = process.env) => (
   readJson(join(jobDir(jobId, env), 'meta.json'), null)
 )
 
-async function withRecordLock(env, callback) {
+export const jobLockPath = (jobId, env = process.env) => (
+  join(jobDir(jobId, env), 'lock')
+)
+
+async function withRecordLock(jobId, env, callback) {
+  const path = jobLockPath(jobId, env)
   const deadline = Date.now() + RECORD_LOCK_TIMEOUT_MS
   while (Date.now() < deadline) {
-    if (await acquireLock(env)) {
+    if (await acquireLockAt(path)) {
       try {
         return await callback()
       } finally {
-        await releaseLock(env)
+        await releaseLockAt(path)
       }
     }
     await sleep(10)
   }
-  throw new Error('timed out waiting for the opencode broker lock')
+  throw new Error(`timed out waiting for job ${jobId} record lock`)
 }
 
 async function mutateJob(jobId, mutation, env) {
-  return withRecordLock(env, async () => {
+  if (!await readJob(jobId, env)) throw new Error(`unknown job: ${jobId}`)
+  return withRecordLock(jobId, env, async () => {
     const current = await readJob(jobId, env)
     if (!current) throw new Error(`unknown job: ${jobId}`)
     const next = mutation(current)
