@@ -55,6 +55,27 @@ async function registerSessions(env, ...ids) {
   for (const id of ids) await writeFile(join(sessionsDir(env), `${id}.json`), '{}')
 }
 
+async function waitForChildPid(path, startup) {
+  const startupSettled = startup.then(
+    () => true,
+    () => true,
+  )
+  while (true) {
+    try {
+      const pid = Number(await readFile(path, 'utf8'))
+      if (Number.isInteger(pid) && pid > 0) return pid
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+
+    const settled = await Promise.race([
+      new Promise((resolve) => setTimeout(() => resolve(false), 10)),
+      startupSettled,
+    ])
+    if (settled) throw new Error('broker startup settled before its child PID was recorded')
+  }
+}
+
 async function withFakeOwnedBroker(env, callback) {
   const child = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
   const password = 'test-password'
@@ -468,17 +489,17 @@ test('startup timeout terminates the detached child before clearing state', asyn
   const childPidFile = join(env.XDG_STATE_HOME, 'child.pid')
   env.OPENCODE_BROKER_CHILD_PID_FILE = childPidFile
   env.FAKE_OPENCODE_FAULT = 'slow-start'
-  env.FAKE_OPENCODE_START_DELAY_MS = '1000'
+  env.FAKE_OPENCODE_START_DELAY_MS = '10000'
+  const startup = ensureBroker({ env, timeoutMs: 1000 })
+  let childPid
   try {
-    await assert.rejects(
-      () => ensureBroker({ env, timeoutMs: 100 }),
-      /timed out|would not start|never answered|EPERM/,
-    )
-    const childPid = Number(await readFile(childPidFile, 'utf8'))
-    assert.ok(childPid > 0)
+    childPid = await waitForChildPid(childPidFile, startup)
+    await assert.rejects(startup, /timed out|would not start|never answered|EPERM/)
     assert.equal(isAlive(childPid), false)
     assert.equal(await readEndpoint(env), null)
   } finally {
+    await startup.catch(() => {})
+    if (childPid && isAlive(childPid)) await terminate(childPid, { graceMs: 1000 })
     await shutdownBroker(env)
   }
 })
