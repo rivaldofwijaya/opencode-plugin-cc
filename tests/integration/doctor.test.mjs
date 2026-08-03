@@ -6,7 +6,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runDoctor, requireReady, CompanionError } from '../../scripts/lib/doctor.mjs'
 import { readEndpoint } from '../../scripts/lib/broker-endpoint.mjs'
-import { shutdownBroker } from '../../scripts/lib/broker-lifecycle.mjs'
+import { ensureBroker, shutdownBroker } from '../../scripts/lib/broker-lifecycle.mjs'
+import { isAlive } from '../../scripts/lib/process.mjs'
 import { clearBinaryCache } from '../../scripts/lib/opencode.mjs'
 
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
@@ -48,6 +49,68 @@ test('a fully configured environment reports ok and cleans up its probe broker',
   }
   assert.equal(await readEndpoint(s.env), null)
   await shutdownBroker(s.env)
+})
+
+test('a failed broker probe leaves no endpoint behind', async () => {
+  clearBinaryCache()
+  const s = await sandbox({ FAKE_OPENCODE_FAULT: 'port-bound' })
+  const r = await runDoctor({ env: s.env, cwd: s.cwd })
+  assert.equal(r.server.ok, false)
+  assert.match(r.server.detail, /would not start|EADDRINUSE/)
+  assert.equal(await readEndpoint(s.env), null)
+})
+
+test('doctor does not stop a broker that was already running', async (t) => {
+  clearBinaryCache()
+  const s = await sandbox()
+  await writeFile(join(s.env.XDG_DATA_HOME, 'opencode', 'auth.json'), '{"openrouter":{"type":"api","key":"k"}}')
+  await writeFile(join(s.env.XDG_CONFIG_HOME, 'opencode', 'opencode.jsonc'), '{"model":"openrouter/x"}')
+  let broker
+  try {
+    broker = await ensureBroker({ env: s.env })
+  } catch (error) {
+    if (bindFailure(error)) {
+      t.skip(`loopback binding is unavailable in this sandbox: ${error.message}`)
+      return
+    }
+    throw error
+  }
+
+  try {
+    const before = await readEndpoint(s.env)
+    const r = await runDoctor({ env: s.env, cwd: s.cwd })
+    if (!r.server.ok && bindFailure(r.server.detail)) {
+      t.skip(`loopback binding is unavailable in this sandbox: ${r.server.detail}`)
+      return
+    }
+    const after = await readEndpoint(s.env)
+    assert.equal(r.server.ok, true, JSON.stringify(r.gaps))
+    assert.equal(r.server.broker.disposition, 'pre-existing')
+    assert.equal(after.pid, before.pid)
+    assert.equal(isAlive(before.pid), true)
+  } finally {
+    await shutdownBroker(s.env)
+  }
+})
+
+test('a shutdown failure is reported with the broker location', async () => {
+  clearBinaryCache()
+  const s = await sandbox()
+  const location = 'http://127.0.0.1:45678'
+  const r = await runDoctor({
+    env: s.env,
+    cwd: s.cwd,
+    ensureBrokerFn: async () => ({ baseUrl: location }),
+    shutdownBrokerFn: async () => {
+      throw new Error('timed out waiting for the opencode broker lock')
+    },
+  })
+  assert.equal(r.ok, false)
+  assert.equal(r.server.ok, false)
+  assert.match(r.server.detail, /could not shut down the broker/)
+  assert.match(r.server.detail, /may still be running/)
+  assert.match(r.server.detail, new RegExp(location.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.equal(r.server.broker.shutdown.ok, false)
 })
 
 test('a missing binary short-circuits every later check', async () => {
