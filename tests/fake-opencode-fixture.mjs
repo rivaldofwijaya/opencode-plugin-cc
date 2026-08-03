@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http'
-import { readFileSync } from 'node:fs'
+import { appendFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const argv = process.argv.slice(2)
@@ -75,6 +75,16 @@ function authProviders() {
     if (error.code !== 'ENOENT') throw error
     const override = process.env.FAKE_OPENCODE_PROVIDERS
     return override ? override.split(',').map((provider) => provider.trim()).filter(Boolean) : []
+  }
+}
+
+function recordRequest(request) {
+  const path = process.env.FAKE_OPENCODE_REQUEST_LOG
+  if (!path) return
+  try {
+    appendFileSync(path, JSON.stringify(request) + '\n')
+  } catch {
+    // The opt-in test affordance must not change fixture behavior.
   }
 }
 
@@ -190,6 +200,7 @@ if (argv[0] === 'serve') {
     if (url.pathname === '/session' && req.method === 'POST') {
       const id = `ses_fake_${sessions.size + 1}`
       sessions.set(id, { aborted: false })
+      recordRequest({ type: 'session-create', sessionID: id })
       req.resume()
       return send(200, { id, directory: process.cwd(), time: { created: 0, updated: 0 } })
     }
@@ -198,6 +209,7 @@ if (argv[0] === 'serve') {
     if (match && req.method === 'POST') {
       const [, id, action] = match
       if (!sessions.has(id)) sessions.set(id, { aborted: false })
+      recordRequest({ type: action === 'prompt_async' ? 'prompt' : 'abort', sessionID: id })
       req.resume()
       if (action === 'abort') {
         sessions.get(id).aborted = true
