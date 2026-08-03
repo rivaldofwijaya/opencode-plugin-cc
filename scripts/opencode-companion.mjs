@@ -9,6 +9,9 @@ import { resolveBinary } from './lib/opencode.mjs'
 import { run } from './lib/process.mjs'
 import { reapOrphans } from './lib/broker-lifecycle.mjs'
 import { pruneStale } from './lib/tracked-jobs.mjs'
+import { prepareReview, finishReview, REVIEW_AGENT, REVIEW_TOOLS } from './lib/review-job.mjs'
+import { startJob, runForeground } from './lib/job-control.mjs'
+import { resolveScope, sizeChange, repoRoot } from './lib/git.mjs'
 
 // Exit-code contract: 0 is success, 1 is a reported gap (doctor's approved
 // R12.4 JSON-on-stdout exemption), 2 is an invalid invocation, and 3 is an
@@ -162,6 +165,74 @@ const handlers = {
     ]
     return { stdout: lines.join('\n'), exitCode: EXIT_CODES.SUCCESS }
   },
+
+  'review-size': async ({ flags, cwd }) => {
+    const root = await repoRoot(cwd).catch(() => { throw new CompanionError(`not a git repository: ${cwd}`) })
+    const resolved = await resolveScope({ cwd: root, scope: flags.scope || 'auto', base: flags.base })
+    const size = await sizeChange({ cwd: root, scope: resolved.scope, base: resolved.base })
+    const payload = { scope: resolved.scope, base: resolved.base, ...size }
+    return { stdout: flags.json ? JSON.stringify(payload, null, 2) : JSON.stringify(payload), exitCode: EXIT_CODES.SUCCESS }
+  },
+
+  review: (ctx) => reviewVerb(ctx, { adversarial: false }),
+  'adversarial-review': (ctx) => reviewVerb(ctx, { adversarial: true }),
+}
+
+async function reviewVerb({ flags, positional, env, cwd, ccSessionId }, { adversarial }) {
+  if (flags.wait && flags.background) {
+    throw new CompanionError('invalid invocation: review accepts only one of --wait or --background', EXIT_CODES.INVALID_INVOCATION)
+  }
+  if (flags.scope !== undefined && !['auto', 'working-tree', 'branch'].includes(flags.scope)) {
+    throw new CompanionError('invalid invocation: review --scope must be auto, working-tree, or branch', EXIT_CODES.INVALID_INVOCATION)
+  }
+
+  const report = await runDoctor({ env, cwd, checkServer: false })
+  requireReady(report)
+
+  const prep = await prepareReview({
+    cwd,
+    scope: flags.scope || 'auto',
+    base: flags.base,
+    adversarial,
+    focus: positional.join(' '),
+  })
+
+  const verb = adversarial ? 'adversarial-review' : 'review'
+  const jobOpts = {
+    ccSessionId,
+    verb,
+    prompt: prep.prompt,
+    agent: REVIEW_AGENT,
+    tools: REVIEW_TOOLS,
+    model: flags.model && flags.model !== true ? String(flags.model) : undefined,
+    variant: (flags.variant ?? flags.effort) && flags.variant !== true ? String(flags.variant ?? flags.effort) : undefined,
+    cwd: prep.root,
+    env,
+  }
+
+  if (flags.background) {
+    const { jobId } = await startJob({ ...jobOpts, background: true })
+    return {
+      stdout: `Started ${verb} as ${jobId}. Check it with /opencode:status, read it with /opencode:result ${jobId}.`,
+      exitCode: EXIT_CODES.SUCCESS,
+    }
+  }
+
+  const settled = await runForeground(jobOpts)
+  const rendered = await finishReview({
+    jobId: settled.id,
+    env,
+    scope: prep.scope,
+    base: prep.base,
+    truncated: prep.truncated,
+  })
+  if (settled.state === 'failed') {
+    return { stdout: `${rendered}\n\nThe job ended in state "failed": ${settled.error ?? 'unknown error'}.`, exitCode: EXIT_CODES.GAP }
+  }
+  if (settled.state === 'cancelled') {
+    return { stdout: `${rendered}\n\nThe job ended in state "cancelled": ${settled.error ?? 'unknown error'}.`, exitCode: EXIT_CODES.GAP }
+  }
+  return { stdout: rendered, exitCode: EXIT_CODES.SUCCESS }
 }
 
 export const VERBS = Object.keys(handlers)
@@ -215,6 +286,39 @@ export const COMMAND_SPECS = Object.freeze({
       help: { type: 'boolean' },
     },
     maxPositionals: 0,
+  },
+  'review-size': {
+    flags: {
+      help: { type: 'boolean' },
+      json: { type: 'boolean' },
+      base: { type: 'value' },
+      scope: { type: 'value' },
+    },
+    maxPositionals: 0,
+  },
+  review: {
+    flags: {
+      help: { type: 'boolean' },
+      wait: { type: 'boolean' },
+      background: { type: 'boolean' },
+      base: { type: 'value' },
+      scope: { type: 'value' },
+      model: { type: 'value' },
+      variant: { type: 'value' },
+    },
+    maxPositionals: 0,
+  },
+  'adversarial-review': {
+    flags: {
+      help: { type: 'boolean' },
+      wait: { type: 'boolean' },
+      background: { type: 'boolean' },
+      base: { type: 'value' },
+      scope: { type: 'value' },
+      model: { type: 'value' },
+      variant: { type: 'value' },
+    },
+    maxPositionals: Infinity,
   },
 })
 
