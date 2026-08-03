@@ -352,6 +352,7 @@ export async function startJob({
   cwd,
   tools,
   resumeSessionID,
+  meta,
   background = true,
   env = process.env,
 }) {
@@ -360,7 +361,7 @@ export async function startJob({
     verb,
     cwd,
     background,
-    meta: { agent, model, variant },
+    meta: { agent, model, variant, ...(meta ?? {}) },
   }, env)
 
   let releaseBrokerRef

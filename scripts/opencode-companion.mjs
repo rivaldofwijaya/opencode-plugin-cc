@@ -13,8 +13,8 @@ import {
   lastOpencodeSession,
   listJobs,
   pruneStale,
+  readJob,
   readResult,
-  updateJobMeta,
   rememberOpencodeSession,
 } from './lib/tracked-jobs.mjs'
 import {
@@ -28,13 +28,15 @@ import {
 import { atomicWrite } from './lib/fs.mjs'
 import {
   prepareReview,
+  finishReview,
   finishReviewResult,
   neutralizePromptDelimiters,
   REVIEW_AGENT,
   REVIEW_TOOLS,
 } from './lib/review-job.mjs'
-import { startJob, runForeground } from './lib/job-control.mjs'
+import { startJob, runForeground, cancelJob, cancelAll } from './lib/job-control.mjs'
 import { resolveScope, sizeChange, repoRoot } from './lib/git.mjs'
+import { renderJobList, renderJobResult } from './lib/render.mjs'
 
 // Exit-code contract: 0 is success, 1 is a reported gap (doctor's approved
 // R12.4 JSON-on-stdout exemption), 2 is an invalid invocation, and 3 is an
@@ -438,6 +440,86 @@ const handlers = {
     lines.push('Security: no secret redaction or content filtering was applied; sensitive transcript text may have been sent to opencode.')
     return { stdout: lines.join('\n'), exitCode: EXIT_CODES.SUCCESS }
   },
+
+  status: async ({ env, ccSessionId }) => {
+    const jobs = await listJobs(ccSessionId, env)
+    return { stdout: renderJobList(jobs), exitCode: EXIT_CODES.SUCCESS }
+  },
+
+  result: async ({ positional, env, ccSessionId }) => {
+    const jobId = positional[0]
+    if (!jobId) {
+      throw new CompanionError(
+        'result requires a job id, e.g. result job_abc123',
+        EXIT_CODES.INVALID_INVOCATION,
+      )
+    }
+
+    const job = await readJob(jobId, env)
+    if (!job) throw new CompanionError(`unknown job: ${jobId}. Run /opencode:status to see this session's jobs.`)
+    if (job.ccSessionId !== ccSessionId) {
+      throw new CompanionError(`job ${jobId} belongs to a different Claude Code session.`)
+    }
+
+    const text = await readResult(jobId, env)
+    const isReview = job.verb === 'review' || job.verb === 'adversarial-review'
+    if (isReview && job.state !== 'running' && text?.trim()) {
+      const rendered = await finishReview({
+        jobId,
+        env,
+        scope: job.meta?.scope ?? 'working-tree',
+        base: job.meta?.base ?? null,
+        truncated: job.meta?.truncated ?? false,
+      })
+      return { stdout: renderJobResult(job, rendered, { formatted: true }), exitCode: EXIT_CODES.SUCCESS }
+    }
+    return { stdout: renderJobResult(job, text), exitCode: EXIT_CODES.SUCCESS }
+  },
+
+  cancel: async ({ flags, positional, env, ccSessionId }) => {
+    if (flags.all && positional.length) {
+      throw new CompanionError(
+        'invalid invocation: cancel --all cannot be combined with a job id',
+        EXIT_CODES.INVALID_INVOCATION,
+      )
+    }
+    if (flags.all) {
+      const before = await listJobs(ccSessionId, env)
+      const ids = await cancelAll(ccSessionId, env)
+      if (!ids.length) {
+        return {
+          stdout: 'There was nothing running to cancel for this Claude Code session.',
+          exitCode: EXIT_CODES.SUCCESS,
+        }
+      }
+      const details = ids.map((id) => {
+        const job = before.find((candidate) => candidate.id === id)
+        const started = jobStartDescription(job)
+        return `  ${job?.verb ?? 'opencode job'} ${id} — cancelled${started}`
+      })
+      return {
+        stdout: `Cancelled ${ids.length} job(s):\n${details.join('\n')}`,
+        exitCode: EXIT_CODES.SUCCESS,
+      }
+    }
+
+    const jobId = positional[0]
+    if (!jobId) {
+      throw new CompanionError('cancel requires a job id or --all', EXIT_CODES.INVALID_INVOCATION)
+    }
+    const job = await readJob(jobId, env)
+    if (!job) throw new CompanionError(`unknown job: ${jobId}`)
+    if (job.ccSessionId !== ccSessionId) {
+      throw new CompanionError(`job ${jobId} belongs to a different Claude Code session.`)
+    }
+
+    const outcome = await cancelJob(jobId, env)
+    const started = jobStartDescription(job)
+    const message = outcome === 'cancelled'
+      ? `Cancelled ${job.verb} ${jobId}; state is cancelled${started}.`
+      : `${job.verb} ${jobId} had already finished (state: ${job.state}${started}); nothing to cancel.`
+    return { stdout: message, exitCode: EXIT_CODES.SUCCESS }
+  },
 }
 
 export function buildTransferPrompt(handoff) {
@@ -484,16 +566,12 @@ async function reviewVerb({ flags, positional, env, cwd, ccSessionId }, { advers
     model: flags.model && flags.model !== true ? String(flags.model) : undefined,
     variant: flags.variant && flags.variant !== true ? String(flags.variant) : undefined,
     cwd: prep.root,
+    meta: { scope: prep.scope, base: prep.base, truncated: prep.truncated },
     env,
   }
 
   if (flags.background) {
     const { jobId } = await startJob({ ...jobOpts, background: true })
-    await updateJobMeta(jobId, {
-      scope: prep.scope,
-      base: prep.base,
-      truncated: prep.truncated,
-    }, env)
     return {
       stdout: `Started ${verb} as ${jobId}. Check it with /opencode:status, read it with /opencode:result ${jobId}.`,
       exitCode: EXIT_CODES.SUCCESS,
@@ -630,10 +708,34 @@ export const COMMAND_SPECS = Object.freeze({
     },
     maxPositionals: 0,
   },
+  status: {
+    flags: {
+      help: { type: 'boolean' },
+    },
+    maxPositionals: 0,
+  },
+  result: {
+    flags: {
+      help: { type: 'boolean' },
+    },
+    maxPositionals: 1,
+  },
+  cancel: {
+    flags: {
+      help: { type: 'boolean' },
+      all: { type: 'boolean' },
+    },
+    maxPositionals: 1,
+  },
 })
 
 function errorDetail(error) {
   return error instanceof Error ? error.message : String(error)
+}
+
+function jobStartDescription(job) {
+  if (!Number.isFinite(job?.startedAt) || job.startedAt <= 0) return ''
+  return ` (started ${new Date(job.startedAt).toISOString()})`
 }
 
 function ensurePersistedSessionPath({ env, ccSessionId }) {

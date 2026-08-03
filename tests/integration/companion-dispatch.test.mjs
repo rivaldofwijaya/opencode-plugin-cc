@@ -45,7 +45,9 @@ test('--help exits 0 and lists the verbs that exist now', async () => {
   const e = await env()
   const r = await run(process.execPath, [companion, '--help'], { env: e.env })
   assert.equal(r.code, 0)
-  assert.match(r.stdout, /\bdoctor\b/)
+  for (const v of ['doctor', 'review', 'adversarial-review', 'review-size', 'task', 'task-resume-candidate', 'transfer', 'status', 'result', 'cancel', 'set-key', 'set-model', 'models', 'gate', 'repair']) {
+    assert.match(r.stdout, new RegExp(`\\b${v.replace('-', '\\-')}\\b`), v)
+  }
 })
 
 test('no arguments exits 0 with usage', async () => {
