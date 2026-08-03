@@ -136,7 +136,7 @@ async function processCommand(pid) {
   }
 }
 
-async function ownsWorker(job, env) {
+async function ownedWorkerToken(job, env) {
   if (!job || !Number.isInteger(job.pid) || job.pid <= 0) return false
   const owner = await readJson(join(jobDir(job.id, env), 'worker-owner.json'), null)
   if (!owner
@@ -146,10 +146,21 @@ async function ownsWorker(job, env) {
     || !owner.workerToken) return false
   if (!isAlive(owner.pid)) return false
   const command = await processCommand(owner.pid)
-  return Boolean(command
-    && command.includes(WORKER_FLAG)
-    && command.includes(job.id)
-    && command.includes(owner.workerToken))
+  if (!command
+    || !command.includes(WORKER_FLAG)
+    || !command.includes(job.id)
+    || !command.includes(owner.workerToken)) return false
+  return owner.workerToken
+}
+
+async function terminateWorkerAndRelease(ccSessionId, workerPid, workerToken, env, graceMs) {
+  try {
+    await terminate(workerPid, { graceMs })
+  } finally {
+    // A killed worker may never run its finally; release its exact token here.
+    // releaseRef is idempotent when the worker released it before termination.
+    await releaseRef(ccSessionId, env, workerToken)
+  }
 }
 
 async function writeWorkerOwner(jobId, pid, workerToken, env) {
@@ -386,8 +397,8 @@ export async function startJob({
         workerOwnsRef = true
         await releaseLauncherRef()
       } catch (error) {
-        if (worker?.pid && isAlive(worker.pid) && !workerOwnsRef) {
-          await terminate(worker.pid, { graceMs: 1000 })
+        if (worker?.pid && !workerOwnsRef) {
+          await terminateWorkerAndRelease(ccSessionId, worker.pid, workerToken, env, 1000)
         }
         throw error
       }
@@ -422,6 +433,7 @@ export async function cancelJob(jobId, env = process.env) {
   if (job.state !== 'running') return 'already-finished'
 
   await updateJob(jobId, { state: 'cancelled', endedAt: Date.now() }, env)
+  const workerToken = await ownedWorkerToken(job, env)
   if (job.sessionID) {
     try {
       const broker = await ensureBroker({ env })
@@ -430,8 +442,8 @@ export async function cancelJob(jobId, env = process.env) {
       // The durable cancellation record is authoritative if the broker is gone.
     }
   }
-  if (job.pid && job.pid !== process.pid && await ownsWorker(job, env)) {
-    await terminate(job.pid, { graceMs: 3000 })
+  if (job.pid && job.pid !== process.pid && workerToken) {
+    await terminateWorkerAndRelease(job.ccSessionId, job.pid, workerToken, env, 3000)
   }
   return 'cancelled'
 }

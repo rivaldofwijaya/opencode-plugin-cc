@@ -4,7 +4,11 @@ import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { run } from '../../scripts/lib/process.mjs'
+import { isAlive, run } from '../../scripts/lib/process.mjs'
+import { cancelJob } from '../../scripts/lib/job-control.mjs'
+import { listJobs, readJob, readResult } from '../../scripts/lib/tracked-jobs.mjs'
+import { readJson } from '../../scripts/lib/state.mjs'
+import { refsPath } from '../../scripts/lib/broker-endpoint.mjs'
 
 const companion = fileURLToPath(new URL('../../scripts/opencode-companion.mjs', import.meta.url))
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
@@ -40,6 +44,34 @@ async function sandbox(extra = {}) {
 
 const cli = (env, cwd, args) => run(process.execPath, [companion, ...args], { env, cwd, timeoutMs: 60000 })
 
+function jobIdFrom(result) {
+  return `${result.stdout}\n${result.stderr}`.match(/job_[a-z0-9]+/)?.[0]
+}
+
+async function waitForTerminal(s, jobId, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs
+  let job
+  while (Date.now() < deadline) {
+    job = await readJob(jobId, s.env)
+    if (job && job.state !== 'running') return job
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  assert.fail(`timed out waiting for terminal job ${jobId}`)
+}
+
+async function waitForWorkerExit(job, timeoutMs = 5000) {
+  if (!Number.isInteger(job?.pid) || job.pid <= 0) return
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline && isAlive(job.pid)) {
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  assert.equal(isAlive(job.pid), false, `worker ${job.pid} is still alive`)
+}
+
+async function assertNoBrokerRefs(s) {
+  assert.deepEqual(await readJson(refsPath(s.env), {}), {})
+}
+
 async function requestLog(s) {
   try {
     const text = await readFile(join(s.home, 'requests.jsonl'), 'utf8')
@@ -54,11 +86,12 @@ test('task-resume-candidate reports no candidate on a fresh session', async () =
   const s = await sandbox()
   const r = await cli(s.env, s.home, ['task-resume-candidate', '--json'])
   assert.equal(r.code, 0)
-  const c = JSON.parse(r.stdout)
-  assert.equal(c.hasCandidate, null)
-  assert.equal(c.status, 'unknown')
-  assert.equal(c.reason, 'no-record')
-  assert.equal(c.sessionID, null)
+  assert.deepEqual(JSON.parse(r.stdout), {
+    hasCandidate: false,
+    sessionID: null,
+    lastVerb: null,
+    lastEndedAt: null,
+  })
 })
 
 test('task-resume-candidate does not guess when the remembered session has no job record', async () => {
@@ -72,9 +105,7 @@ test('task-resume-candidate does not guess when the remembered session has no jo
   const r = await cli(s.env, s.home, ['task-resume-candidate', '--json'])
   assert.equal(r.code, 0)
   assert.deepEqual(JSON.parse(r.stdout), {
-    hasCandidate: null,
-    status: 'unknown',
-    reason: 'missing-job-record',
+    hasCandidate: false,
     sessionID: 'ses_orphan',
     lastVerb: null,
     lastEndedAt: null,
@@ -103,9 +134,7 @@ test('task-resume-candidate reports an unusable remembered session explicitly', 
   const r = await cli(s.env, s.home, ['task-resume-candidate', '--json'])
   assert.equal(r.code, 0)
   assert.deepEqual(JSON.parse(r.stdout), {
-    hasCandidate: null,
-    status: 'unknown',
-    reason: 'dead-session',
+    hasCandidate: false,
     sessionID: 'ses_dead',
     lastVerb: 'task',
     lastEndedAt: 2,
@@ -134,10 +163,10 @@ test('task-resume-candidate reports an ambiguous remembered record explicitly', 
   const r = await cli(s.env, s.home, ['task-resume-candidate', '--json'])
   assert.equal(r.code, 0)
   const candidate = JSON.parse(r.stdout)
-  assert.equal(candidate.hasCandidate, null)
-  assert.equal(candidate.status, 'unknown')
-  assert.equal(candidate.reason, 'ambiguous-record')
+  assert.equal(candidate.hasCandidate, false)
   assert.equal(candidate.sessionID, 'ses_unknown')
+  assert.equal(candidate.lastVerb, 'task')
+  assert.equal(candidate.lastEndedAt, null)
 })
 
 test('a foreground task prints the model output verbatim', async (t) => {
@@ -163,8 +192,6 @@ test('task-resume-candidate reports the prior session afterwards', async (t) => 
   if (skipBindFailure(t, task)) return
   const c = JSON.parse((await cli(s.env, s.home, ['task-resume-candidate', '--json'])).stdout)
   assert.equal(c.hasCandidate, true)
-  assert.equal(c.status, 'resumable')
-  assert.equal(c.reason, 'completed-task')
   assert.match(c.sessionID, /^ses_/)
   assert.equal(c.lastVerb, 'task')
   assert.ok(Number.isInteger(c.lastEndedAt))
@@ -227,12 +254,124 @@ test('task rejects incompatible session controls', async () => {
   }
 })
 
+test('task --resume refuses a non-resumable candidate without starting a fresh job', async () => {
+  const s = await sandbox()
+  const r = await cli(s.env, s.home, ['task', '--wait', '--resume', '--', 'must not start'])
+  assert.equal(r.code, 1)
+  assert.equal(r.stderr, 'cannot resume the prior opencode session: no prior opencode session is recorded\n')
+  assert.deepEqual(await listJobs('cc-task', s.env), [])
+  assert.deepEqual(await requestLog(s), [])
+})
+
+test('task --resume refuses a remembered REVIEW session and names its verb', async () => {
+  const s = await sandbox()
+  const sessions = join(s.env.XDG_STATE_HOME, 'opencode-plugin-cc', 'sessions')
+  const jobs = join(s.env.XDG_STATE_HOME, 'opencode-plugin-cc', 'jobs')
+  await mkdir(sessions, { recursive: true })
+  await mkdir(join(jobs, 'job_review'), { recursive: true })
+  await writeFile(join(sessions, 'cc-task.json'), JSON.stringify({
+    ccSessionId: 'cc-task',
+    lastOpencodeSession: 'ses_review',
+  }))
+  await writeFile(join(jobs, 'job_review', 'meta.json'), JSON.stringify({
+    id: 'job_review',
+    ccSessionId: 'cc-task',
+    verb: 'review',
+    state: 'done',
+    sessionID: 'ses_review',
+    startedAt: 1,
+    endedAt: 2,
+  }))
+
+  const before = await listJobs('cc-task', s.env)
+  const candidate = JSON.parse((await cli(s.env, s.home, ['task-resume-candidate', '--json'])).stdout)
+  assert.deepEqual(candidate, {
+    hasCandidate: false,
+    sessionID: 'ses_review',
+    lastVerb: 'review',
+    lastEndedAt: 2,
+  })
+
+  const r = await cli(s.env, s.home, ['task', '--wait', '--resume', '--', 'must not reuse review'])
+  assert.equal(r.code, 1)
+  assert.equal(
+    r.stderr,
+    'cannot resume the prior opencode session: remembered session was created by review; only task sessions are resumable\n',
+  )
+  assert.deepEqual(await requestLog(s), [])
+  assert.deepEqual((await listJobs('cc-task', s.env)).map(job => job.id), before.map(job => job.id))
+  assert.equal((await listJobs('cc-task', s.env)).some(job => job.state === 'running'), false)
+})
+
+test('task-resume-candidate rejects tied matching records as ambiguous', async () => {
+  const s = await sandbox()
+  const sessions = join(s.env.XDG_STATE_HOME, 'opencode-plugin-cc', 'sessions')
+  const jobs = join(s.env.XDG_STATE_HOME, 'opencode-plugin-cc', 'jobs')
+  await mkdir(sessions, { recursive: true })
+  for (const [id, endedAt] of [['job_a', 2], ['job_b', 3]]) {
+    await mkdir(join(jobs, id), { recursive: true })
+    await writeFile(join(jobs, id, 'meta.json'), JSON.stringify({
+      id,
+      ccSessionId: 'cc-task',
+      verb: 'task',
+      state: 'done',
+      sessionID: 'ses_tied',
+      startedAt: 1,
+      endedAt,
+    }))
+  }
+  await writeFile(join(sessions, 'cc-task.json'), JSON.stringify({
+    ccSessionId: 'cc-task',
+    lastOpencodeSession: 'ses_tied',
+  }))
+
+  const r = await cli(s.env, s.home, ['task-resume-candidate', '--json'])
+  assert.equal(r.code, 0)
+  assert.deepEqual(JSON.parse(r.stdout), {
+    hasCandidate: false,
+    sessionID: 'ses_tied',
+    lastVerb: 'task',
+    lastEndedAt: 3,
+  })
+})
+
+test('task-resume-candidate rejects an empty matching record as unknown', async () => {
+  const s = await sandbox()
+  const sessions = join(s.env.XDG_STATE_HOME, 'opencode-plugin-cc', 'sessions')
+  const job = join(s.env.XDG_STATE_HOME, 'opencode-plugin-cc', 'jobs', 'job_empty')
+  await mkdir(sessions, { recursive: true })
+  await mkdir(job, { recursive: true })
+  await writeFile(join(sessions, 'cc-task.json'), JSON.stringify({
+    ccSessionId: 'cc-task',
+    lastOpencodeSession: 'ses_empty',
+  }))
+  await writeFile(join(job, 'meta.json'), JSON.stringify({
+    ccSessionId: 'cc-task',
+    sessionID: 'ses_empty',
+  }))
+
+  const r = await cli(s.env, s.home, ['task-resume-candidate', '--json'])
+  assert.equal(r.code, 0)
+  assert.deepEqual(JSON.parse(r.stdout), {
+    hasCandidate: false,
+    sessionID: 'ses_empty',
+    lastVerb: null,
+    lastEndedAt: null,
+  })
+})
+
 test('task --background returns a job id immediately', async (t) => {
   const s = await sandbox({ FAKE_OPENCODE_EVENT_DELAY_MS: '150' })
   const r = await cli(s.env, s.home, ['task', '--background', '--', 'long job'])
   if (skipBindFailure(t, r)) return
   assert.equal(r.code, 0)
-  assert.match(r.stdout, /job_[a-z0-9]+/)
+  const jobId = jobIdFrom(r)
+  assert.ok(jobId)
+  const job = await waitForTerminal(s, jobId)
+  assert.equal(job.state, 'done')
+  await waitForWorkerExit(job)
+  assert.match(await readResult(jobId, s.env), /"findings"/)
+  await assertNoBrokerRefs(s)
 })
 
 test('task forwards model options without taking away write access', async (t) => {
@@ -303,4 +442,75 @@ test('a failing job surfaces the error and a non-zero exit', async (t) => {
   if (skipBindFailure(t, r)) return
   assert.equal(r.code, 1)
   assert.match(r.stderr + r.stdout, /ProviderAuthError/)
+  const jobId = jobIdFrom(r)
+  assert.ok(jobId)
+  const job = await readJob(jobId, s.env)
+  assert.equal(job.state, 'failed')
+  await waitForWorkerExit(job)
+  await assertNoBrokerRefs(s)
+})
+
+test('a failed background task leaves no worker or broker reference', async (t) => {
+  const s = await sandbox()
+  const script = join(s.home, 'background-failure.jsonl')
+  await writeFile(script, JSON.stringify({
+    type: 'session.error',
+    properties: { error: { name: 'ProviderAuthError' } },
+  }) + '\n')
+  const r = await cli({ ...s.env, FAKE_OPENCODE_SCRIPT: script }, s.home, [
+    'task', '--background', '--', 'background boom',
+  ])
+  if (skipBindFailure(t, r)) return
+  assert.equal(r.code, 0)
+  const jobId = jobIdFrom(r)
+  assert.ok(jobId)
+  const job = await waitForTerminal(s, jobId)
+  assert.equal(job.state, 'failed')
+  assert.equal(job.error, 'ProviderAuthError')
+  await waitForWorkerExit(job)
+  await assertNoBrokerRefs(s)
+})
+
+test('a cancelled background task leaves no worker or broker reference', async (t) => {
+  const s = await sandbox({ FAKE_OPENCODE_EVENT_DELAY_MS: '250' })
+  const r = await cli(s.env, s.home, ['task', '--background', '--', 'cancel me'])
+  if (skipBindFailure(t, r)) return
+  assert.equal(r.code, 0)
+  const jobId = jobIdFrom(r)
+  assert.ok(jobId)
+
+  const deadline = Date.now() + 10000
+  let running
+  while (Date.now() < deadline) {
+    running = await readJob(jobId, s.env)
+    if (running?.state === 'running' && Number.isInteger(running.pid) && running.pid > 0) break
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  assert.equal(running?.state, 'running')
+  assert.ok(running.pid > 0)
+  assert.equal(await cancelJob(jobId, s.env), 'cancelled')
+
+  const job = await waitForTerminal(s, jobId)
+  assert.equal(job.state, 'cancelled')
+  await waitForWorkerExit(job)
+  await assertNoBrokerRefs(s)
+})
+
+test('a timed-out background task leaves no worker or broker reference', async (t) => {
+  const s = await sandbox()
+  const script = join(s.home, 'timeout-script.jsonl')
+  await writeFile(script, '')
+  const r = await cli({ ...s.env, FAKE_OPENCODE_SCRIPT: script }, s.home, [
+    'task', '--background', '--', 'time out',
+  ])
+  if (skipBindFailure(t, r)) return
+  assert.equal(r.code, 0)
+  const jobId = jobIdFrom(r)
+  assert.ok(jobId)
+
+  const job = await waitForTerminal(s, jobId, 25000)
+  assert.equal(job.state, 'failed')
+  assert.match(job.error, /aborted|event stream|timed out/i)
+  await waitForWorkerExit(job)
+  await assertNoBrokerRefs(s)
 })
