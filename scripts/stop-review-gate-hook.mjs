@@ -17,12 +17,28 @@ const GATE_TIMEOUT_MS = (() => {
     : DEFAULT_GATE_TIMEOUT_MS
 })()
 const GATE_CLEANUP_TIMEOUT_MS = 3_000
+const BROKER_RELEASE_TIMEOUT_MS = 250
 const HOOK_HARD_TIMEOUT_MS = 115_000
 const PAYLOAD_TIMEOUT_MS = 100
 
-installHookSafety(HOOK_HARD_TIMEOUT_MS)
-
 let gateRun = null
+
+async function releaseGateBrokerRefWithinBudget() {
+  const release = gateRun?.release
+  if (!release) return
+  try {
+    await withTimeout(
+      () => release(),
+      BROKER_RELEASE_TIMEOUT_MS,
+      'Stop review broker release',
+    )
+  } catch {
+    // A stuck release must not delay the hook; dead-holder pruning is the
+    // safety net for a residual exact-token record.
+  }
+}
+
+installHookSafety(HOOK_HARD_TIMEOUT_MS, releaseGateBrokerRefWithinBudget, BROKER_RELEASE_TIMEOUT_MS)
 
 async function testCleanupScenario() {
   const payload = await readPayload({ timeoutMs: PAYLOAD_TIMEOUT_MS })
@@ -116,6 +132,7 @@ async function evaluateGate() {
     ccSessionId,
     hookToken,
     jobId: null,
+    release: null,
   }
   const execution = await startJob({
     ccSessionId,
@@ -124,9 +141,12 @@ async function evaluateGate() {
     cwd: prepared.root,
     agent: REVIEW_AGENT,
     tools: REVIEW_TOOLS,
+    background: false,
     meta: { stopHookToken: hookToken },
+    onBrokerRefAcquired: (release) => { gateRun.release = release },
   })
   gateRun.jobId = execution.jobId
+  gateRun.release = execution.release
   const settled = await execution.done
   if (settled?.state !== 'done') return null
 
@@ -159,6 +179,7 @@ async function cleanupTimedOutGateWithinBudget() {
   } catch {
     // The durable job PID and broker holder records remain for repair/pruning.
   }
+  await releaseGateBrokerRefWithinBudget()
 }
 
 async function main() {
@@ -179,6 +200,7 @@ async function main() {
 try {
   await main()
 } finally {
+  await releaseGateBrokerRefWithinBudget()
   // R18.1 exemption: the best-effort Stop hook always exits 0 so a plugin
   // fault can never block the user's Claude Code session, including a failure
   // while constructing the failure-log payload above.

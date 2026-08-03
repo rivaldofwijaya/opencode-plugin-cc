@@ -77,6 +77,8 @@ async function main() {
 
     if (process.env.OPENCODE_TEST_HANG_LIFECYCLE_WORK === '1') {
       // Test-only indefinite work exercises the outer hard watchdog directly.
+      // Keep one independent handle alive so an unref'd watchdog can still fire.
+      setInterval(() => {}, 1_000)
       await new Promise(() => {})
     }
 
@@ -112,5 +114,5 @@ try {
   // R18.1 exemption: best-effort lifecycle hooks always exit 0 so a plugin
   // fault can never break the user's Claude Code session, including a failure
   // while constructing the failure-log payload above.
-  process.exit(0)
+  process.exitCode = 0
 }

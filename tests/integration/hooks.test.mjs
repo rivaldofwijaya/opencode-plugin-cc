@@ -248,6 +248,16 @@ test('lifecycle exits 0 when the failure logger rejects inside its own path', as
   assert.ok(Date.now() - startedAt < 900, 'failure-log construction exceeded the hook budget')
 })
 
+test('SessionEnd exits promptly after quick work instead of waiting for the hard watchdog', async () => {
+  const s = await sandbox()
+  const startedAt = Date.now()
+  const r = await hook(lifecycle, ['SessionEnd'], s.env, { session_id: 'cc-fast-end', cwd: s.repo })
+  const elapsed = Date.now() - startedAt
+  assert.equal(r.code, 0, JSON.stringify(r))
+  assert.equal(r.timedOut, false, 'SessionEnd exceeded the harness budget')
+  assert.ok(elapsed < 900, `fast SessionEnd lingered for ${elapsed}ms`)
+})
+
 test('lifecycle hard watchdog exits 0 near its deadline when work never settles', async () => {
   const s = await sandbox({ OPENCODE_TEST_HANG_LIFECYCLE_WORK: '1' })
   const startedAt = Date.now()
@@ -345,7 +355,12 @@ test('the Stop gate exits 0 silently when opencode is not ready', async () => {
   assert.equal(r.stdout.trim(), '')
 })
 
-test('the Stop gate cancels a timed-out foreground review and releases its broker ref', async (t) => {
+test('the Stop gate review stays foreground and leaves no detached worker', async (t) => {
+  const source = await readFile(gate, 'utf8')
+  const startCall = source.match(/const execution = await startJob\(\{([\s\S]*?)\n  \}\)/)?.[1]
+  assert.ok(startCall, 'Stop gate startJob call not found')
+  assert.match(startCall, /\bbackground:\s*false\b/)
+
   const s = await sandbox({
     FAKE_OPENCODE_EVENT_DELAY_MS: '1000',
     OPENCODE_STOP_GATE_TIMEOUT_MS: '600',
@@ -372,6 +387,11 @@ test('the Stop gate cancels a timed-out foreground review and releases its broke
   assert.equal(jobs.length, 1)
   const meta = JSON.parse(await readFile(join(s.env.XDG_STATE_HOME, 'opencode-plugin-cc', 'jobs', jobs[0], 'meta.json'), 'utf8'))
   assert.equal(meta.state, 'cancelled')
+  assert.equal(
+    await readFile(join(s.env.XDG_STATE_HOME, 'opencode-plugin-cc', 'jobs', jobs[0], 'worker-owner.json'), 'utf8').catch(() => null),
+    null,
+    'foreground Stop review left a detached worker owner record',
+  )
   assert.deepEqual(await readJson(refsPath(s.env), {}), {})
   assert.equal(await readEndpoint(s.env), null)
 })

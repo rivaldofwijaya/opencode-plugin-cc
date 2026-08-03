@@ -6,12 +6,46 @@ import { stateRoot } from './state.mjs'
 const DEFAULT_PAYLOAD_TIMEOUT_MS = 1_000
 const MAX_PAYLOAD_BYTES = 1_024 * 1_024
 export const HOOK_FAILURE_LOG_TIMEOUT_MS = 150
+const DEFAULT_EXIT_CLEANUP_TIMEOUT_MS = 250
 
-export function installHookSafety(timeoutMs) {
-  const forceExit = () => process.exit(0)
+export function installHookSafety(
+  timeoutMs,
+  onExit,
+  cleanupTimeoutMs = DEFAULT_EXIT_CLEANUP_TIMEOUT_MS,
+) {
+  let exiting = false
+  const forceExit = () => {
+    if (exiting) return
+    exiting = true
+
+    let cleanup
+    try {
+      cleanup = onExit?.()
+    } catch {
+      process.exit(0)
+      return
+    }
+
+    if (!cleanup || typeof cleanup.then !== 'function') {
+      process.exit(0)
+      return
+    }
+
+    let finished = false
+    let timer
+    const finish = () => {
+      if (finished) return
+      finished = true
+      clearTimeout(timer)
+      process.exit(0)
+    }
+    timer = setTimeout(finish, Math.max(0, cleanupTimeoutMs))
+    Promise.resolve(cleanup).then(finish, finish)
+  }
   process.once('unhandledRejection', forceExit)
   process.once('uncaughtException', forceExit)
-  setTimeout(forceExit, Math.max(0, timeoutMs))
+  const watchdog = setTimeout(forceExit, Math.max(0, timeoutMs))
+  watchdog.unref()
 }
 
 function objectPayload(value) {
