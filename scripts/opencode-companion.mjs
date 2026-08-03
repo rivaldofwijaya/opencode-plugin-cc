@@ -2,6 +2,13 @@
 import { parseArgs } from './lib/args.mjs'
 import { runDoctor, requireReady, CompanionError } from './lib/doctor.mjs'
 import { renderDoctor } from './lib/render.mjs'
+import { setKey } from './lib/credentials.mjs'
+import { setModel } from './lib/config.mjs'
+import { readGate, writeGate } from './lib/gate.mjs'
+import { resolveBinary } from './lib/opencode.mjs'
+import { run } from './lib/process.mjs'
+import { reapOrphans } from './lib/broker-lifecycle.mjs'
+import { pruneStale } from './lib/tracked-jobs.mjs'
 
 // Exit-code contract: 0 is success, 1 is a reported gap (doctor's approved
 // R12.4 JSON-on-stdout exemption), 2 is an invalid invocation, and 3 is an
@@ -26,6 +33,78 @@ const handlers = {
     const stdout = flags.json ? JSON.stringify(report, null, 2) : renderDoctor(report)
     return { stdout, exitCode: report.ok ? EXIT_CODES.SUCCESS : EXIT_CODES.GAP }
   },
+
+  'set-key': async ({ flags, env, cwd }) => {
+    if (!flags.provider || flags.provider === true) throw new CompanionError('set-key requires --provider <name>')
+    if (!flags.key || flags.key === true) throw new CompanionError('set-key requires --key <API_KEY>')
+    let res
+    try {
+      res = await setKey({ provider: flags.provider, key: String(flags.key), env })
+    } catch (error) {
+      throw new CompanionError(error.message)
+    }
+    const lines = [`Stored a key for ${res.provider} (${res.redacted}) in ${res.path}.`]
+    if (res.backup) lines.push(`Backed up the previous file to ${res.backup}.`)
+    const report = await runDoctor({ env, cwd, checkServer: false })
+    lines.push('', renderDoctor(report))
+    return { stdout: lines.join('\n'), exitCode: EXIT_CODES.SUCCESS }
+  },
+
+  'set-model': async ({ flags, env, cwd }) => {
+    if (!flags.model || flags.model === true) throw new CompanionError('set-model requires --model <provider/model>')
+    if (flags.scope !== undefined && flags.scope !== 'global' && flags.scope !== 'project') {
+      throw new CompanionError('invalid invocation: set-model --scope must be global or project', EXIT_CODES.INVALID_INVOCATION)
+    }
+    const scope = flags.scope ?? 'global'
+    let res
+    try {
+      res = await setModel({ model: String(flags.model), scope, env, cwd })
+    } catch (error) {
+      throw new CompanionError(error.message)
+    }
+    const lines = [`Set the default model to ${flags.model} in ${res.path} (${scope} scope).`]
+    if (res.backup) lines.push(`Backed up the previous file to ${res.backup}.`)
+    lines.push(`Comments were dropped: ${res.commentsDropped ? 'yes' : 'no'}.`)
+    const report = await runDoctor({ env, cwd, checkServer: false })
+    lines.push('', renderDoctor(report))
+    return { stdout: lines.join('\n'), exitCode: report.model.ok ? EXIT_CODES.SUCCESS : EXIT_CODES.GAP }
+  },
+
+  models: async ({ flags, env }) => {
+    const bin = await resolveBinary({ env })
+    const r = await run(bin.path, ['models'], { env, timeoutMs: 60000 })
+    if (r.code !== 0) throw new CompanionError(`opencode models failed:\n${r.stderr.trim()}`)
+    let lines = r.stdout.split('\n').map(line => line.trim()).filter(Boolean)
+    if (flags.provider && flags.provider !== true) {
+      lines = lines.filter(line => line.startsWith(`${flags.provider}/`))
+    }
+    return { stdout: lines.join('\n'), exitCode: EXIT_CODES.SUCCESS }
+  },
+
+  gate: async ({ flags, env }) => {
+    const requested = [flags.on, flags.off, flags.status].filter(Boolean).length
+    if (requested > 1) {
+      throw new CompanionError('invalid invocation: gate accepts only one of --on, --off, or --status', EXIT_CODES.INVALID_INVOCATION)
+    }
+    if (flags.on) await writeGate(true, env)
+    else if (flags.off) await writeGate(false, env)
+    const on = await readGate(env)
+    return {
+      stdout: flags.status ? (on ? 'on' : 'off') : `The Stop review gate is ${on ? 'on' : 'off'}.`,
+      exitCode: EXIT_CODES.SUCCESS,
+    }
+  },
+
+  repair: async ({ env }) => {
+    const broker = await reapOrphans(env)
+    const jobs = await pruneStale(env)
+    const lines = [
+      broker.cleared ? 'Cleared a stale broker portfile.' : 'The broker record was already clean.',
+      jobs.stale.length ? `Marked ${jobs.stale.length} orphaned job record(s) stale: ${jobs.stale.join(', ')}` : 'No orphaned job records.',
+      jobs.removed.length ? `Removed ${jobs.removed.length} expired job record(s).` : 'No expired job records.',
+    ]
+    return { stdout: lines.join('\n'), exitCode: EXIT_CODES.SUCCESS }
+  },
 }
 
 export const VERBS = Object.keys(handlers)
@@ -39,6 +118,44 @@ export const COMMAND_SPECS = Object.freeze({
       help: { type: 'boolean' },
       json: { type: 'boolean' },
       server: { type: 'boolean', negatable: true },
+    },
+    maxPositionals: 0,
+  },
+  'set-key': {
+    flags: {
+      help: { type: 'boolean' },
+      provider: { type: 'value' },
+      key: { type: 'value' },
+    },
+    maxPositionals: 0,
+  },
+  'set-model': {
+    flags: {
+      help: { type: 'boolean' },
+      model: { type: 'value' },
+      scope: { type: 'value' },
+    },
+    maxPositionals: 0,
+  },
+  models: {
+    flags: {
+      help: { type: 'boolean' },
+      provider: { type: 'value' },
+    },
+    maxPositionals: 0,
+  },
+  gate: {
+    flags: {
+      help: { type: 'boolean' },
+      on: { type: 'boolean' },
+      off: { type: 'boolean' },
+      status: { type: 'boolean' },
+    },
+    maxPositionals: 0,
+  },
+  repair: {
+    flags: {
+      help: { type: 'boolean' },
     },
     maxPositionals: 0,
   },

@@ -58,7 +58,10 @@ export async function setKey({ provider, key, env = process.env }) {
       { mode: 0o600 },
     )
     return { provider, redacted: redact(keyText), backup, created, path }
-  } catch {
-    throw new Error('set-key failed')
+  } catch (error) {
+    // The error code is diagnostic but never contains credential material;
+    // do not expose the underlying error object or message.
+    const code = typeof error?.code === 'string' ? error.code : null
+    throw new Error(code ? `set-key failed (${code})` : 'set-key failed')
   }
 }
