@@ -346,8 +346,18 @@ function pruneDeadHolders(refs) {
 }
 
 function pruneUnknownSessions(refs, known) {
-  for (const ccSessionId of Object.keys(refs)) {
-    if (!known.has(ccSessionId)) delete refs[ccSessionId]
+  for (const [ccSessionId, holders] of Object.entries(refs)) {
+    if (known.has(ccSessionId)) continue
+
+    // A live process can own a non-session holder (for example doctor's
+    // probe reference), so registry absence alone is not stale evidence.
+    // pruneDeadHolders already removed holders whose recorded PID is dead;
+    // pid-less legacy holders remain reclaimable here. Filter per holder so a
+    // live non-session holder cannot shelter a dead or legacy sibling.
+    for (const [holderToken, holder] of Object.entries(holders)) {
+      if (!Number.isInteger(holder.pid) || !isAlive(holder.pid)) delete holders[holderToken]
+    }
+    if (!Object.keys(holders).length) delete refs[ccSessionId]
   }
   return refs
 }

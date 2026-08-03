@@ -1,14 +1,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runDoctor, requireReady, CompanionError } from '../../scripts/lib/doctor.mjs'
-import { readEndpoint } from '../../scripts/lib/broker-endpoint.mjs'
+import { readEndpoint, writeEndpoint, refsPath } from '../../scripts/lib/broker-endpoint.mjs'
 import { ensureBroker, addRef, releaseRef, shutdownBroker } from '../../scripts/lib/broker-lifecycle.mjs'
-import { sessionsDir } from '../../scripts/lib/state.mjs'
-import { isAlive } from '../../scripts/lib/process.mjs'
+import { brokerDir, readJson, sessionsDir, writeJson } from '../../scripts/lib/state.mjs'
+import { isAlive, spawnDetached, terminate } from '../../scripts/lib/process.mjs'
 import { clearBinaryCache } from '../../scripts/lib/opencode.mjs'
 
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
@@ -34,6 +35,26 @@ async function configuredSandbox(extra = {}) {
   await writeFile(join(s.env.XDG_DATA_HOME, 'opencode', 'auth.json'), '{"openrouter":{"type":"api","key":"k"}}')
   await writeFile(join(s.env.XDG_CONFIG_HOME, 'opencode', 'opencode.jsonc'), '{"model":"openrouter/x"}')
   return s
+}
+
+async function withFakeOwnedBroker(env, callback) {
+  const child = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  const password = 'test-password'
+  const startedAt = Date.now()
+  const endpoint = { port: 1, pid: child.pid, password, startedAt }
+  await writeEndpoint(endpoint, env)
+  await writeJson(join(brokerDir(env), 'owner.json'), {
+    pid: child.pid,
+    port: 1,
+    startedAt,
+    passwordHash: createHash('sha256').update(password).digest('hex'),
+  })
+  try {
+    return await callback({ pid: child.pid })
+  } finally {
+    await shutdownBroker(env)
+    if (isAlive(child.pid)) await terminate(child.pid, { graceMs: 1000 })
+  }
 }
 
 const bindFailure = (detail) => /EACCES|EPERM|EADDRNOTAVAIL|loopback|listen/i.test(String(detail))
@@ -106,6 +127,38 @@ test('doctor releases its reference but does not stop a broker held by another s
   }
 })
 
+test('a live doctor reference survives a concurrent release and is cleaned up on exit', async () => {
+  clearBinaryCache()
+  const s = await configuredSandbox()
+  await mkdir(sessionsDir(s.env), { recursive: true })
+  await writeFile(join(sessionsDir(s.env), 'other-session.json'), '{}')
+  await addRef('other-session', s.env, 'other-holder')
+
+  await withFakeOwnedBroker(s.env, async (broker) => {
+    let concurrentResult
+    let concurrentBrokerAlive
+    const location = 'http://127.0.0.1:45678'
+    const r = await runDoctor({
+      env: s.env,
+      cwd: s.cwd,
+      inspectBrokerFn: async () => {
+        concurrentResult = await releaseRef('other-session', s.env, 'other-holder')
+        concurrentBrokerAlive = isAlive(broker.pid)
+        return { state: 'running', baseUrl: location }
+      },
+      ensureBrokerFn: async () => ({ baseUrl: location }),
+    })
+
+    assert.equal(concurrentBrokerAlive, true, 'broker was stopped while the doctor reference was live')
+    assert.deepEqual(concurrentResult, { remaining: 1, shutdown: false })
+    assert.equal(r.ok, true, JSON.stringify(r.gaps))
+    assert.deepEqual(r.server.broker.refcount, { remaining: 0, shutdown: true, released: true })
+    assert.deepEqual(await readJson(refsPath(s.env), {}), {})
+    assert.equal(await readEndpoint(s.env), null)
+    assert.equal(isAlive(broker.pid), false)
+  })
+})
+
 test('doctor uses plural wording for multiple remaining session references', async () => {
   clearBinaryCache()
   const s = await configuredSandbox()
@@ -122,6 +175,33 @@ test('doctor uses plural wording for multiple remaining session references', asy
   assert.equal(r.server.ok, true, JSON.stringify(r.gaps))
   assert.equal(r.server.broker.shutdown, 'not attempted (2 other session references remain)')
   assert.match(r.server.detail, /broker remains running because 2 other session references remain/)
+})
+
+test('doctor rejects malformed broker release results and names the broker location', async () => {
+  clearBinaryCache()
+  const s = await configuredSandbox()
+  const location = 'http://127.0.0.1:45678'
+  const malformed = [
+    { remaining: 0, shutdown: false },
+    { released: 'yes', remaining: 0, shutdown: false },
+    { released: true, remaining: -1, shutdown: false },
+    { released: true, remaining: 0, shutdown: 'no' },
+  ]
+
+  for (const outcome of malformed) {
+    const r = await runDoctor({
+      env: s.env,
+      cwd: s.cwd,
+      addRefFn: async () => {},
+      inspectBrokerFn: async () => ({ state: 'absent' }),
+      ensureBrokerFn: async () => ({ baseUrl: location }),
+      releaseRefFn: async () => outcome,
+    })
+    assert.equal(r.ok, false, JSON.stringify(outcome))
+    assert.equal(r.server.ok, false, JSON.stringify(outcome))
+    assert.equal(r.server.broker.shutdown.ok, false, JSON.stringify(outcome))
+    assert.match(r.gaps.at(-1), /invalid result at http:\/\/127\.0\.0\.1:45678/)
+  }
 })
 
 test('doctor stops the broker when its reference is the only holder', async () => {

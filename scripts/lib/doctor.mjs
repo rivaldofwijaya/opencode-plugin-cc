@@ -100,7 +100,9 @@ function recordRelease(report, outcome, location) {
   report.server.broker.refcount = outcome
 
   if (!outcome || typeof outcome !== 'object'
-    || !Number.isInteger(outcome.remaining) || typeof outcome.shutdown !== 'boolean') {
+    || typeof outcome.released !== 'boolean'
+    || !Number.isInteger(outcome.remaining) || outcome.remaining < 0
+    || typeof outcome.shutdown !== 'boolean') {
     const detail = `doctor's broker reference release returned an invalid result at ${location}; the server may still be running there`
     report.server.ok = false
     report.server.broker.shutdown = { ok: false, detail }
@@ -244,6 +246,7 @@ export async function runDoctor({
         addGap(report, `the opencode server would not start: ${detail}`)
       } finally {
         const location = brokerLocation(broker, observed)
+        // If addRef failed, no reference was taken, so there is nothing to release.
         if (referenceHeld) {
           try {
             const outcome = await releaseRefFn(doctorIdentity, env)
