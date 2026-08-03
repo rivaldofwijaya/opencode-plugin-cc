@@ -461,10 +461,18 @@ export async function cancelJob(jobId, env = process.env, { ensureBrokerFn = ens
   return 'cancelled'
 }
 
-export async function cancelAll(ccSessionId, env = process.env) {
+export async function cancelAll(ccSessionId, env = process.env, { preserveLive = false } = {}) {
   const cancelled = []
   for (const job of await listJobs(ccSessionId, env)) {
     if (job.state !== 'running') continue
+    if (preserveLive) {
+      // SessionEnd records cancellation for its session without terminating a
+      // detached worker that may still be legitimate work. The worker's live
+      // PID holder keeps the broker protected until it releases itself.
+      await updateJob(job.id, { state: 'cancelled', endedAt: Date.now() }, env)
+      cancelled.push(job.id)
+      continue
+    }
     if (await cancelJob(job.id, env) === 'cancelled') cancelled.push(job.id)
   }
   return cancelled

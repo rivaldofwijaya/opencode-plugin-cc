@@ -17,7 +17,14 @@ export function neutralizePromptDelimiters(value) {
   return String(value).replaceAll('<', '＜').replaceAll('>', '＞')
 }
 
-export async function prepareReview({ cwd, scope = 'auto', base, adversarial = false, focus = '' }) {
+export async function prepareReview({
+  cwd,
+  scope = 'auto',
+  base,
+  adversarial = false,
+  focus = '',
+  promptName = 'review',
+}) {
   const root = await repoRoot(cwd).catch(() => { throw new CompanionError(`not a git repository: ${cwd}`) })
   const resolved = await resolveScope({ cwd: root, scope, base })
   const size = await sizeChange({ cwd: root, scope: resolved.scope, base: resolved.base })
@@ -37,12 +44,10 @@ export async function prepareReview({ cwd, scope = 'auto', base, adversarial = f
     DIFF: `${openDelimiter}\n${diff.text}\n${closeDelimiter}`,
   }
   const focusText = typeof focus === 'string' ? focus.trim() : String(focus ?? '').trim()
-  const prompt = adversarial
-    ? await loadPrompt('adversarial-review', {
+  const prompt = await loadPrompt(adversarial ? 'adversarial-review' : promptName, {
       ...vars,
-      FOCUS: neutralizePromptDelimiters(focusText || '(none given)'),
+      ...(adversarial ? { FOCUS: neutralizePromptDelimiters(focusText || '(none given)') } : {}),
     })
-    : await loadPrompt('review', vars)
   return { prompt, root, scope: resolved.scope, base: resolved.base, size, truncated: diff.truncated }
 }
 
