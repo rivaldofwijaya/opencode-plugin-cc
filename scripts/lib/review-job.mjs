@@ -13,7 +13,7 @@ export const REVIEW_TOOLS = {
   edit: false, write: false, patch: false, bash: false, webfetch: false,
 }
 
-function neutralizePromptDelimiters(value) {
+export function neutralizePromptDelimiters(value) {
   return String(value).replaceAll('<', '＜').replaceAll('>', '＞')
 }
 
