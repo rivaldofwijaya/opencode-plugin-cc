@@ -1,26 +1,73 @@
-import { join } from 'node:path'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { access, readFile } from 'node:fs/promises'
 import { stateRoot, ensureDir } from './state.mjs'
 import { atomicWrite } from './fs.mjs'
 
-async function exists(path) {
+const MAX_CC_SESSION_ID_LENGTH = 128
+const CC_SESSION_ID_PATTERN = /^[A-Fa-f0-9_-]+$/
+
+export function validateCcSessionId(value) {
+  const id = typeof value === 'string' ? value : ''
+  if (
+    !id
+    || id.length > MAX_CC_SESSION_ID_LENGTH
+    || !CC_SESSION_ID_PATTERN.test(id)
+  ) {
+    const error = new Error(
+      `invalid Claude Code session id: expected 1-${MAX_CC_SESSION_ID_LENGTH} hexadecimal, dash, or underscore characters`,
+    )
+    error.code = 'INVALID_SESSION_ID'
+    error.transferKind = 'invalid-session-id'
+    throw error
+  }
+  return id
+}
+
+function unreadableTranscriptError(path, error, operation = 'read') {
+  const wrapped = new Error(`could not ${operation} Claude Code transcript ${path}: ${error.message}`)
+  wrapped.code = error.code
+  wrapped.cause = error
+  wrapped.path = path
+  wrapped.transferKind = 'unreadable'
+  return wrapped
+}
+
+async function exists(path, accessFn = access) {
   try {
-    await access(path)
+    await accessFn(path)
     return true
-  } catch {
-    return false
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false
+    throw unreadableTranscriptError(path, error, 'access')
   }
 }
 
-export async function transcriptPath({ env = process.env, ccSessionId, cwd }) {
+function isWithin(root, path) {
+  const distance = relative(root, path)
+  return distance === '' || (
+    !isAbsolute(distance)
+    && distance !== '..'
+    && !distance.startsWith(`..${sep}`)
+  )
+}
+
+export async function transcriptPath({ env = process.env, ccSessionId, cwd, accessFn = access }) {
+  const sessionId = validateCcSessionId(ccSessionId)
   const explicit = env.CLAUDE_TRANSCRIPT_PATH
-  if (explicit && await exists(explicit)) return explicit
+  if (explicit && await exists(explicit, accessFn)) return explicit
 
   const home = env.HOME
   if (!home) return null
   const slug = String(cwd ?? '').replaceAll('/', '-').replaceAll('.', '-')
-  const candidate = join(home, '.claude', 'projects', slug, `${ccSessionId}.jsonl`)
-  return (await exists(candidate)) ? candidate : null
+  const projectsRoot = resolve(home, '.claude', 'projects')
+  const candidate = resolve(projectsRoot, slug, `${sessionId}.jsonl`)
+  if (!isWithin(projectsRoot, candidate)) {
+    const error = new Error(`refusing Claude Code transcript path outside ${projectsRoot}: ${candidate}`)
+    error.code = 'TRANSCRIPT_PATH_OUTSIDE_PROJECTS'
+    error.transferKind = 'invalid-transcript-path'
+    throw error
+  }
+  return (await exists(candidate, accessFn)) ? candidate : null
 }
 
 function flattenContent(content) {
@@ -38,14 +85,6 @@ function flattenContent(content) {
     .join('\n')
     .trim()
   return { text, droppedParts }
-}
-
-function unreadableTranscriptError(path, error) {
-  const wrapped = new Error(`could not read Claude Code transcript ${path}: ${error.message}`)
-  wrapped.code = error.code
-  wrapped.cause = error
-  wrapped.transferKind = 'unreadable'
-  return wrapped
 }
 
 /**
@@ -128,15 +167,15 @@ function handoffHeader({ cwd, ccSessionId }) {
 export function buildHandoff({ messages, cwd, ccSessionId, maxChars = 120_000 }) {
   const header = handoffHeader({ cwd, ccSessionId })
   const source = Array.isArray(messages) ? messages : []
+  const requestedMax = Number.isFinite(maxChars) ? Math.max(0, Math.floor(maxChars)) : 120_000
 
   if (!source.length) {
-    return header + '(The transcript contained no conversation content.)\n'
+    return (header + '(The transcript contained no conversation content.)\n').slice(0, requestedMax)
   }
 
   const sections = source.map((message) => (
     `## ${String(message?.role ?? 'unknown')}\n\n${String(message?.text ?? '')}\n`
   ))
-  const requestedMax = Number.isFinite(maxChars) ? Math.max(0, Math.floor(maxChars)) : 120_000
   const kept = []
   let used = 0
   for (let index = sections.length - 1; index >= 0; index -= 1) {
@@ -153,18 +192,15 @@ export function buildHandoff({ messages, cwd, ccSessionId, maxChars = 120_000 })
     marker = `_[${omitted} earlier turns omitted to fit the handoff]_\n\n`
   }
 
-  return header + marker + kept.join('\n')
-}
-
-function safeFileComponent(value) {
-  const component = String(value ?? 'default').replace(/[^A-Za-z0-9._-]/g, '_')
-  return component || 'default'
+  const output = header + marker + kept.join('\n')
+  return output.length <= requestedMax ? output : output.slice(0, requestedMax)
 }
 
 export async function writeHandoff({ text, ccSessionId, env = process.env }) {
+  const sessionId = validateCcSessionId(ccSessionId)
   const dir = join(stateRoot(env), 'transfers')
   await ensureDir(dir)
-  const path = join(dir, `${safeFileComponent(ccSessionId)}-${Date.now()}.md`)
+  const path = join(dir, `${sessionId}-${Date.now()}.md`)
   await atomicWrite(path, String(text))
   return path
 }

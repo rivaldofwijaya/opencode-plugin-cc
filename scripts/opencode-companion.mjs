@@ -22,6 +22,7 @@ import {
   readTranscriptReport,
   buildHandoff,
   writeHandoff,
+  validateCcSessionId,
 } from './lib/claude-session-transfer.mjs'
 import { atomicWrite } from './lib/fs.mjs'
 import {
@@ -308,16 +309,41 @@ const handlers = {
     return { stdout: output, exitCode: EXIT_CODES.SUCCESS }
   },
 
-  transfer: async ({ flags, env, cwd, ccSessionId }) => {
-    const report = await runDoctor({ env, cwd, checkServer: false })
+  transfer: async ({
+    flags,
+    env,
+    cwd,
+    ccSessionId,
+    runDoctorFn = runDoctor,
+    addRefFn = addRef,
+    ensureBrokerFn = ensureBroker,
+    releaseRefFn = releaseRef,
+    rememberOpencodeSessionFn = rememberOpencodeSession,
+  }) => {
+    let sessionId
+    try {
+      sessionId = validateCcSessionId(ccSessionId)
+    } catch (error) {
+      throw new CompanionError(error.message, EXIT_CODES.INVALID_INVOCATION)
+    }
+
+    const report = await runDoctorFn({ env, cwd, checkServer: false })
     requireReady(report)
 
-    const tPath = await transcriptPath({ env, ccSessionId, cwd })
+    let tPath = null
     let transcriptReport = null
     let messages = []
     let unreadableError = null
 
-    if (tPath) {
+    try {
+      tPath = await transcriptPath({ env, ccSessionId: sessionId, cwd })
+    } catch (error) {
+      if (error?.transferKind !== 'unreadable') throw error
+      unreadableError = error
+      tPath = error.path ?? env.CLAUDE_TRANSCRIPT_PATH ?? null
+    }
+
+    if (tPath && !unreadableError) {
       try {
         transcriptReport = await readTranscriptReport(tPath)
         messages = transcriptReport.messages
@@ -326,12 +352,12 @@ const handlers = {
       }
     }
 
-    const handoff = buildHandoff({ messages, cwd, ccSessionId })
+    const handoff = buildHandoff({ messages, cwd, ccSessionId: sessionId })
     const truncation = handoff.match(/_\[(\d+) earlier turns omitted to fit the handoff\]_/)
     const omittedTurns = truncation ? Number(truncation[1]) : 0
     const outPath = flags.out && flags.out !== true
       ? String(flags.out)
-      : await writeHandoff({ text: handoff, ccSessionId, env })
+      : await writeHandoff({ text: handoff, ccSessionId: sessionId, env })
     if (flags.out && flags.out !== true) await atomicWrite(outPath, handoff)
 
     if (unreadableError) {
@@ -359,19 +385,19 @@ const handlers = {
     let held = false
     let session
     try {
-      await addRef(ccSessionId, env, holderToken)
+      await addRefFn(sessionId, env, holderToken)
       held = true
-      const broker = await ensureBroker({ env })
+      const broker = await ensureBrokerFn({ env })
       session = await broker.client.createSession({ title: 'Transferred from Claude Code' })
       if (!session?.id) throw new Error('opencode returned no session id')
       await broker.client.promptAsync(session.id, {
         parts: [{ type: 'text', text: buildTransferPrompt(handoff) }],
       })
-      await rememberOpencodeSession(ccSessionId, session.id, env)
+      await rememberOpencodeSessionFn(sessionId, session.id, env)
     } catch (error) {
       throw new CompanionError(`could not seed the opencode session: ${errorDetail(error)}`, EXIT_CODES.GAP)
     } finally {
-      if (held) await releaseRef(ccSessionId, env, holderToken)
+      if (held) await releaseRefFn(sessionId, env, holderToken)
     }
 
     const lines = []
