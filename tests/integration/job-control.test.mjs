@@ -14,6 +14,7 @@ import {
   readResult,
   lastOpencodeSession,
   updateJob,
+  updateJobMeta,
   writeResult,
 } from '../../scripts/lib/tracked-jobs.mjs'
 import { readEndpoint, refsPath } from '../../scripts/lib/broker-endpoint.mjs'
@@ -184,6 +185,26 @@ test('a fast worker with a terminal record does not make startJob throw', async 
   } finally {
     await stopJob(jobId, env)
   }
+})
+
+test('concurrent terminal and metadata updates preserve both fields', async () => {
+  const env = await sandbox()
+  const job = await createJob({
+    ccSessionId: 'cc-concurrent-record',
+    verb: 'review',
+    cwd: repoCwd,
+    background: true,
+    meta: { scope: 'working-tree' },
+  }, env)
+
+  await Promise.all([
+    updateJob(job.id, { state: 'done', endedAt: Date.now(), error: null }, env),
+    updateJobMeta(job.id, { truncated: true }, env),
+  ])
+
+  const final = await readJob(job.id, env)
+  assert.equal(final.state, 'done')
+  assert.equal(final.meta.truncated, true)
 })
 
 test('cancelJob aborts a running foreground job', async (t) => {
