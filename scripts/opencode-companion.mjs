@@ -192,8 +192,9 @@ const handlers = {
   'adversarial-review': (ctx) => reviewVerb(ctx, { adversarial: true }),
 
   'task-resume-candidate': async ({ env, ccSessionId }) => {
+    const candidate = await inspectResumeCandidate(ccSessionId, env)
     return {
-      stdout: JSON.stringify(await inspectResumeCandidate(ccSessionId, env), null, 2),
+      stdout: JSON.stringify(publicCandidatePayload(candidate), null, 2),
       exitCode: EXIT_CODES.SUCCESS,
     }
   },
@@ -473,6 +474,8 @@ function errorDetail(error) {
   return error instanceof Error ? error.message : String(error)
 }
 
+const AMBIGUOUS_CANDIDATE_REASON = 'ambiguous-record: remembered task record is ambiguous'
+
 function candidatePayload({ hasCandidate, status, reason, sessionID = null, last = null }) {
   return {
     hasCandidate,
@@ -484,6 +487,39 @@ function candidatePayload({ hasCandidate, status, reason, sessionID = null, last
   }
 }
 
+function publicCandidatePayload(candidate) {
+  return {
+    hasCandidate: candidate.status === 'resumable',
+    sessionID: candidate.sessionID ?? null,
+    lastVerb: candidate.lastVerb ?? null,
+    lastEndedAt: candidate.lastEndedAt ?? null,
+  }
+}
+
+function isSoundCandidateRecord(job, ccSessionId, sessionID) {
+  if (!job || typeof job !== 'object' || Array.isArray(job)) return false
+  if (typeof job.id !== 'string' || !job.id.trim()) return false
+  if (job.ccSessionId !== ccSessionId) return false
+  if (typeof job.verb !== 'string' || !job.verb.trim()) return false
+  if (job.sessionID !== sessionID) return false
+  if (!Number.isSafeInteger(job.startedAt) || job.startedAt <= 0) return false
+  if (!['running', 'done', 'failed', 'cancelled', 'stale'].includes(job.state)) return false
+  if (job.state === 'running') return job.endedAt === null || job.endedAt === undefined
+  return Number.isSafeInteger(job.endedAt)
+    && job.endedAt >= job.startedAt
+}
+
+function candidateReason(last) {
+  if (last?.verb && last.verb !== 'task') {
+    return `remembered session was created by ${last.verb}; only task sessions are resumable`
+  }
+  if (last?.state === 'failed' || last?.state === 'cancelled' || last?.state === 'stale') {
+    return `remembered task session ended in state "${last.state}"`
+  }
+  if (last?.state === 'running') return 'remembered task session is still running'
+  return AMBIGUOUS_CANDIDATE_REASON
+}
+
 async function inspectResumeCandidate(ccSessionId, env) {
   const remembered = await lastOpencodeSession(ccSessionId, env)
   const sessionID = typeof remembered === 'string' && remembered.trim() ? remembered : null
@@ -491,32 +527,51 @@ async function inspectResumeCandidate(ccSessionId, env) {
     return candidatePayload({
       hasCandidate: null,
       status: 'unknown',
-      reason: 'no-record',
+      reason: 'no prior opencode session is recorded',
     })
   }
 
   const jobs = await listJobs(ccSessionId, env)
   const matches = jobs.filter(job => job?.sessionID === sessionID)
-  const last = matches[0] ?? null
-  if (!last) {
+  if (!matches.length) {
     return candidatePayload({
       hasCandidate: null,
       status: 'unknown',
-      reason: 'missing-job-record',
+      reason: 'remembered session has no job record',
       sessionID,
     })
   }
 
-  const recordIsSound = typeof last.id === 'string'
-    && last.id.length > 0
-    && last.ccSessionId === ccSessionId
-    && typeof last.verb === 'string'
-    && Number.isFinite(last.startedAt)
-  if (!recordIsSound) {
+  const ids = matches.map(job => job?.id)
+  const duplicateIDs = new Set(ids).size !== ids.length
+  if (duplicateIDs || matches.some(job => !isSoundCandidateRecord(job, ccSessionId, sessionID))) {
     return candidatePayload({
       hasCandidate: null,
       status: 'unknown',
-      reason: 'ambiguous-record',
+      reason: AMBIGUOUS_CANDIDATE_REASON,
+      sessionID,
+      last: matches[0],
+    })
+  }
+
+  const newestStartedAt = Math.max(...matches.map(job => job.startedAt))
+  const newest = matches.filter(job => job.startedAt === newestStartedAt)
+  if (newest.length !== 1) {
+    return candidatePayload({
+      hasCandidate: null,
+      status: 'unknown',
+      reason: AMBIGUOUS_CANDIDATE_REASON,
+      sessionID,
+      last: newest[0] ?? matches[0],
+    })
+  }
+  const last = newest[0]
+
+  if (last.verb !== 'task') {
+    return candidatePayload({
+      hasCandidate: null,
+      status: 'unknown',
+      reason: candidateReason(last),
       sessionID,
       last,
     })
@@ -536,7 +591,7 @@ async function inspectResumeCandidate(ccSessionId, env) {
     return candidatePayload({
       hasCandidate: null,
       status: 'unknown',
-      reason: 'dead-session',
+      reason: candidateReason(last),
       sessionID,
       last,
     })
@@ -545,7 +600,7 @@ async function inspectResumeCandidate(ccSessionId, env) {
   return candidatePayload({
     hasCandidate: null,
     status: 'unknown',
-    reason: 'ambiguous-record',
+    reason: candidateReason(last),
     sessionID,
     last,
   })

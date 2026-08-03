@@ -122,7 +122,12 @@ export async function listJobs(ccSessionId, env = process.env) {
     const job = await readJob(id, env)
     if (job?.ccSessionId === ccSessionId) jobs.push(job)
   }
-  return jobs.sort((a, b) => b.startedAt - a.startedAt)
+  return jobs.sort((a, b) => {
+    const aStartedAt = Number.isFinite(a?.startedAt) ? a.startedAt : Number.NEGATIVE_INFINITY
+    const bStartedAt = Number.isFinite(b?.startedAt) ? b.startedAt : Number.NEGATIVE_INFINITY
+    if (aStartedAt !== bStartedAt) return bStartedAt - aStartedAt
+    return String(b?.id ?? '').localeCompare(String(a?.id ?? ''))
+  })
 }
 
 export const appendEvent = (jobId, event, env = process.env) => (

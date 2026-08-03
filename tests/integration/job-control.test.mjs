@@ -316,6 +316,61 @@ test('cancelJob aborts a running foreground job', async (t) => {
   }
 })
 
+test('cancelling one background worker releases only its broker holder', async (t) => {
+  const env = await sandbox({ FAKE_OPENCODE_EVENT_DELAY_MS: '1000' })
+  let firstId
+  let secondId
+  try {
+    const first = await startJob({
+      ccSessionId: 'cc-shared-workers',
+      verb: 'task',
+      prompt: 'cancel this worker',
+      cwd: repoCwd,
+      env,
+    })
+    firstId = first.jobId
+    const second = await startJob({
+      ccSessionId: 'cc-shared-workers',
+      verb: 'task',
+      prompt: 'keep this worker',
+      cwd: repoCwd,
+      env,
+    })
+    secondId = second.jobId
+
+    const firstJob = await readJob(firstId, env)
+    const secondJob = await readJob(secondId, env)
+    const firstOwner = await readJson(join(jobDir(firstId, env), 'worker-owner.json'), null)
+    const secondOwner = await readJson(join(jobDir(secondId, env), 'worker-owner.json'), null)
+    assert.ok(firstJob?.pid > 0)
+    assert.ok(secondJob?.pid > 0)
+    assert.notEqual(firstOwner?.workerToken, secondOwner?.workerToken)
+
+    const before = await readJson(refsPath(env), {})
+    assert.ok(before['cc-shared-workers']?.[firstOwner.workerToken])
+    assert.ok(before['cc-shared-workers']?.[secondOwner.workerToken])
+
+    assert.equal(await cancelJob(firstId, env), 'cancelled')
+
+    const after = await readJson(refsPath(env), {})
+    assert.equal(after['cc-shared-workers']?.[firstOwner.workerToken], undefined)
+    assert.deepEqual(
+      after['cc-shared-workers']?.[secondOwner.workerToken],
+      before['cc-shared-workers']?.[secondOwner.workerToken],
+    )
+    assert.equal((await readJob(secondId, env)).state, 'running')
+  } catch (error) {
+    if (bindFailure(error)) {
+      t.skip(`loopback binding is unavailable in this sandbox: ${error.message}`)
+      return
+    }
+    throw error
+  } finally {
+    await stopJob(firstId, env)
+    await stopJob(secondId, env)
+  }
+})
+
 test('cancelJob does not signal a foreign PID', async () => {
   const env = await sandbox()
   const foreign = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
