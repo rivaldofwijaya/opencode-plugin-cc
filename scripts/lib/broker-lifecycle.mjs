@@ -25,6 +25,12 @@ const brokerScript = fileURLToPath(new URL('../server-broker.mjs', import.meta.u
 const ownerPath = (env) => join(brokerDir(env), 'owner.json')
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const LOCK_WAIT_MS = 20_000
+const BROKER_PROCESS_LOOKUP_TIMEOUT_MS = 1_000
+// ps lstart is resolved to whole seconds. startedAt is captured immediately
+// after spawn, before broker startup/health work, so two seconds covers the
+// resolution plus normal scheduling without accepting a recycled PID from a
+// different broker instance.
+const BROKER_START_TIME_TOLERANCE_MS = 2_000
 const MIN_PLAUSIBLE_PID = 2
 const MAX_PLAUSIBLE_PID = 4_194_304
 
@@ -50,18 +56,74 @@ async function writeOwner(rec, env) {
   await chmod(ownerPath(env), 0o600)
 }
 
+function parseProcessStart(value) {
+  const text = String(value ?? '').trim()
+  if (!text) return null
+  if (/^\d+$/.test(text)) {
+    const numeric = Number(text)
+    if (!Number.isSafeInteger(numeric)) return null
+    if (numeric >= 1_000_000_000_000) return numeric
+    if (numeric >= 1_000_000_000) return numeric * 1_000
+    return null
+  }
+  const parsed = Date.parse(text)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+async function processIdentity(pid, env) {
+  let result
+  try {
+    result = await run('ps', ['-p', String(pid), '-o', 'lstart=', '-o', 'command='], {
+      env,
+      timeoutMs: BROKER_PROCESS_LOOKUP_TIMEOUT_MS,
+    })
+  } catch {
+    return null
+  }
+  if (result.code !== 0 || result.timedOut) return null
+  const output = result.stdout.trim()
+  const numeric = output.match(/^(\d{10,13})\s+([\s\S]+)$/)
+  if (numeric) {
+    return { processStartText: numeric[1], command: numeric[2].trim() }
+  }
+  const lstart = output.match(/^((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+([\s\S]+)$/)
+  if (!lstart) return null
+  return { processStartText: lstart[1], command: lstart[2].trim() }
+}
+
 async function ownsEndpointProcess(rec, env) {
   if (!rec?.pid || !rec?.password) return false
   const owner = await readJson(ownerPath(env), null)
-  return owner?.pid === rec.pid
+  if (!(owner?.pid === rec.pid
     && owner.port === rec.port
     && owner.startedAt === rec.startedAt
-    && owner.passwordHash === passwordHash(rec.password)
+    && owner.passwordHash === passwordHash(rec.password))) {
+    return false
+  }
+  // The endpoint and owner records are both our files, so they are not
+  // process identity evidence. Ask the OS about the live PID instead. This
+  // command-line witness is true for the child we launch as `opencode serve`
+  // and false for a recycled PID held by an unrelated process. Fail closed if
+  // ps is missing, times out, or exits unsuccessfully.
+  const identity = await processIdentity(rec.pid, env)
+  const processStart = parseProcessStart(identity?.processStartText)
+  if (!identity?.command || !processStart || !Number.isFinite(rec.startedAt)) return false
+  if (Math.abs(processStart - rec.startedAt) > BROKER_START_TIME_TOLERANCE_MS) return false
+  return /(?:^|\s)serve(?:\s|$)/.test(identity.command)
+    && /(?:^|\s)--port(?:=|\s+)0(?:\s|$)/.test(identity.command)
+    && /(?:^|\s)--hostname(?:=|\s+)127\.0\.0\.1(?:\s|$)/.test(identity.command)
 }
 
 async function clearOwner(rec, env) {
   const owner = await readJson(ownerPath(env), null)
-  if (!rec || (owner && await ownsEndpointProcess(rec, env))) {
+  const recordMatches = rec && owner?.pid === rec.pid
+    && owner.port === rec.port
+    && owner.startedAt === rec.startedAt
+    && owner.passwordHash === passwordHash(rec.password)
+  const safeToClear = !rec || (recordMatches && (
+    !isAlive(rec.pid) || await ownsEndpointProcess(rec, env)
+  ))
+  if (safeToClear) {
     try {
       await unlink(ownerPath(env))
     } catch (error) {
@@ -83,9 +145,12 @@ async function cleanupOrphanLocked(env) {
   if (await liveEndpoint(env)) return false
 
   // A hand-written or foreign portfile is never allowed to turn reaping into
-  // a kill of an unrelated process. Only a process with our private owner
-  // record may be signalled; dead PIDs need no signal at all.
-  if (rec.pid && isAlive(rec.pid) && await ownsEndpointProcess(rec, env)) {
+  // a kill of an unrelated process. Both our private record and the live
+  // process command line must agree; otherwise leave the record for repair.
+  if (rec.pid && isAlive(rec.pid)) {
+    if (!await ownsEndpointProcess(rec, env)) {
+      return { cleared: false, protected: true }
+    }
     await terminate(rec.pid, { graceMs: TERMINATE_GRACE_MS })
   }
   await clearEndpoint(env)
@@ -100,7 +165,11 @@ export async function reapOrphans(env = process.env) {
   try {
     const endpointCleared = await cleanupOrphanLocked(env)
     const refsCleared = await repairRefsLocked(env)
-    return { cleared: endpointCleared || refsCleared }
+    const cleared = (endpointCleared?.cleared ?? endpointCleared) || refsCleared.cleared
+    const protectedRecord = endpointCleared?.protected || refsCleared.protected
+    return protectedRecord
+      ? { cleared, protected: true, detail: 'broker process identity could not be proven; records remain for repair' }
+      : { cleared }
   } finally {
     await releaseLock(env)
   }
@@ -116,6 +185,7 @@ async function spawnBroker(env, timeoutMs) {
     env: { ...env, OPENCODE_SERVER_PASSWORD: password },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
+  const startedAt = Date.now()
 
   return await new Promise((resolve, reject) => {
     let stdout = ''
@@ -158,7 +228,7 @@ async function spawnBroker(env, timeoutMs) {
         ))
         return
       }
-      resolve({ ...reported, password })
+      resolve({ ...reported, password, startedAt: reported.startedAt ?? startedAt })
     }
 
     timer = setTimeout(() => {
@@ -171,7 +241,11 @@ async function spawnBroker(env, timeoutMs) {
         try {
           const value = JSON.parse(line)
           if (Number.isInteger(value.port) && Number.isInteger(value.pid)) {
-            reported = { port: value.port, pid: value.pid }
+            reported = {
+              port: value.port,
+              pid: value.pid,
+              ...(Number.isFinite(value.startedAt) ? { startedAt: value.startedAt } : {}),
+            }
             break
           }
         } catch {
@@ -202,11 +276,14 @@ async function ensureBrokerLocked(env, timeoutMs) {
     }
   }
 
-  await cleanupOrphanLocked(env)
+  const orphan = await cleanupOrphanLocked(env)
+  if (orphan?.protected) {
+    throw new Error('broker process identity could not be proven; records remain for repair')
+  }
   let rec
   try {
     rec = await spawnBroker(env, Math.max(1, Math.min(25_000, timeoutMs)))
-    rec.startedAt = Date.now()
+    rec.startedAt ??= Date.now()
     await writeOwner(rec, env)
     await writeEndpoint(rec, env)
 
@@ -533,11 +610,17 @@ async function repairRefsLocked(env) {
   await writeRefs(next, env)
 
   let brokerCleared = false
+  let protectedRecord = false
   if (afterCount === 0) {
-    brokerCleared = Boolean(await readEndpoint(env))
-    await shutdownBrokerLocked(env)
+    const hadEndpoint = Boolean(await readEndpoint(env))
+    const outcome = await shutdownBrokerLocked(env)
+    brokerCleared = hadEndpoint && outcome !== 'unverified'
+    protectedRecord = outcome === 'unverified'
   }
-  return beforeCount !== afterCount || brokerCleared
+  return {
+    cleared: beforeCount !== afterCount || brokerCleared,
+    protected: protectedRecord,
+  }
 }
 
 // Counts returned by addRef/releaseRef are live holder records, not sessions.
@@ -591,7 +674,8 @@ async function shutdownBrokerLocked(env) {
   }
 
   let outcome = 'gone'
-  if (rec.pid && isAlive(rec.pid) && await ownsEndpointProcess(rec, env)) {
+  if (rec.pid && isAlive(rec.pid)) {
+    if (!await ownsEndpointProcess(rec, env)) return 'unverified'
     const terminated = await terminate(rec.pid, { graceMs: TERMINATE_GRACE_MS })
     outcome = terminated === 'gone' ? 'gone' : 'stopped'
   }
@@ -623,12 +707,21 @@ export async function releaseRef(ccSessionId, env = process.env, holderToken) {
     await writeRefs(next, env)
 
     const remaining = holderCount(next)
-    const shutdown = remaining === 0
-    if (shutdown) await shutdownBrokerLocked(env)
-    if (!released) return { remaining, shutdown, released: false }
-    return tokenless
-      ? { remaining, shutdown, released: true }
+    let shutdown = false
+    let shutdownDetail
+    if (remaining === 0) {
+      const outcome = await shutdownBrokerLocked(env)
+      shutdown = outcome !== 'unverified'
+      if (!shutdown) shutdownDetail = 'broker process identity could not be proven; records remain for repair'
+    }
+    if (!released) {
+      const result = { remaining, shutdown, released: false }
+      return shutdownDetail ? { ...result, detail: shutdownDetail } : result
+    }
+    const result = tokenless
+      ? { remaining, shutdown, released }
       : { remaining, shutdown }
+    return shutdownDetail ? { ...result, detail: shutdownDetail } : result
   })
 }
 

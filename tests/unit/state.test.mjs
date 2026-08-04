@@ -1,13 +1,35 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, appendFile } from 'node:fs/promises'
+import { mkdtemp, appendFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { stateRoot, jobsDir, jobDir, readJson, writeJson, appendJsonl, readJsonl } from '../../scripts/lib/state.mjs'
+import {
+  stateRoot,
+  jobsDir,
+  jobDir,
+  sessionsDir,
+  transfersDir,
+  readJson,
+  writeJson,
+  appendJsonl,
+  readJsonl,
+  ensureDir,
+} from '../../scripts/lib/state.mjs'
+import { hookLogPayload, logHookFailure } from '../../scripts/lib/hook-io.mjs'
 
 test('stateRoot honours XDG_STATE_HOME then falls back to ~/.local/state', () => {
   assert.equal(stateRoot({ XDG_STATE_HOME: '/x' }), '/x/opencode-plugin-cc')
   assert.equal(stateRoot({ HOME: '/h' }), '/h/.local/state/opencode-plugin-cc')
+})
+
+test('hook logger payload forwards only state-root environment values', () => {
+  const payload = hookLogPayload({
+    hook: 'test',
+    event: 'Stop',
+    error: new Error('failure'),
+    env: { HOME: '/home/test', XDG_STATE_HOME: '/state/test', SECRET: 'do-not-forward' },
+  })
+  assert.deepEqual(payload.env, { HOME: '/home/test', XDG_STATE_HOME: '/state/test' })
 })
 
 test('jobDir nests under jobs/', () => {
@@ -50,4 +72,30 @@ test('readJson and readJsonl rethrow non-ENOENT, non-parse errors', async () => 
   const d = await mkdtemp(join(tmpdir(), 'ocstate-'))
   await assert.rejects(readJson(d), error => error.code === 'EISDIR')
   await assert.rejects(readJsonl(d), error => error.code === 'EISDIR')
+})
+
+test('state directories and files are private, including an existing state tree', async () => {
+  const d = await mkdtemp(join(tmpdir(), 'ocstate-'))
+  const env = { XDG_STATE_HOME: d, HOME: '/unused' }
+  const root = stateRoot(env)
+  await ensureDir(root)
+  await ensureDir(jobsDir(env))
+  await ensureDir(sessionsDir(env))
+  await ensureDir(transfersDir(env))
+  await writeJson(join(jobsDir(env), 'prompt.json'), { prompt: 'secret' })
+  await appendJsonl(join(sessionsDir(env), 'events.jsonl'), { event: 'secret' })
+  await writeJson(join(transfersDir(env), 'handoff.md'), { conversation: 'secret' })
+  await logHookFailure({ hook: 'test', event: 'x', error: new Error('secret'), env })
+
+  for (const directory of [root, jobsDir(env), sessionsDir(env), transfersDir(env)]) {
+    assert.equal((await stat(directory)).mode & 0o777, 0o700, directory)
+  }
+  for (const file of [
+    join(jobsDir(env), 'prompt.json'),
+    join(sessionsDir(env), 'events.jsonl'),
+    join(transfersDir(env), 'handoff.md'),
+    join(root, 'hook-errors.jsonl'),
+  ]) {
+    assert.equal((await stat(file)).mode & 0o777, 0o600, file)
+  }
 })

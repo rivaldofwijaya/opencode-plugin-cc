@@ -9,7 +9,7 @@ import {
 } from '../../scripts/lib/job-control.mjs'
 
 const capturePath = fileURLToPath(new URL(
-  '../../.superpowers/sdd/2026-08-02-opencode-plugin-cc/live-capture/task-job-events.jsonl',
+  '../captures/opencode-1.18.13-task-stream.jsonl',
   import.meta.url,
 ))
 
@@ -125,17 +125,8 @@ test('stream idle timeout rejects invalid overrides and keeps the default', () =
   }
 })
 
-test('replaying the real task capture produces exactly the assistant answer', async (t) => {
-  let contents
-  try {
-    contents = await readFile(capturePath, 'utf8')
-  } catch (error) {
-    if (error.code === 'ENOENT') {
-      t.skip(`live capture is absent: ${capturePath}`)
-      return
-    }
-    throw error
-  }
+test('replaying the real task capture produces exactly the assistant answer', async () => {
+  const contents = await readFile(capturePath, 'utf8')
 
   const accumulator = createEventAccumulator()
   for (const line of contents.trim().split(/\r?\n/)) {

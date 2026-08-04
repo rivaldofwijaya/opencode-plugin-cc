@@ -7,6 +7,8 @@ import { baseUrlFor, readEndpoint } from './broker-endpoint.mjs'
 import { isAlive } from './process.mjs'
 import { OpencodeClient } from './server.mjs'
 
+export const REVIEW_AGENT = 'general'
+
 export class CompanionError extends Error {
   constructor(message, exitCode = 1) {
     super(message)
@@ -83,6 +85,26 @@ function brokerReport(observation, location) {
   }
 }
 
+function agentNames(value) {
+  const entries = Array.isArray(value)
+    ? value
+    : (Array.isArray(value?.agents)
+        ? value.agents
+        : Object.entries(value ?? {}).map(([name, data]) => (
+          { name, ...(data && typeof data === 'object' ? data : {}) }
+        )))
+  return entries
+    .map((agent) => typeof agent === 'string' ? agent : agent?.name ?? agent?.id)
+    .filter((name) => typeof name === 'string' && name)
+}
+
+async function serverAgents(broker) {
+  if (broker?.client?.agents) return agentNames(await broker.client.agents())
+  if (!broker?.baseUrl) throw new Error('broker did not provide a client or base URL for agent discovery')
+  const client = new OpencodeClient(broker.baseUrl, { password: broker.password })
+  return agentNames(await client.agents())
+}
+
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error)
 }
@@ -126,6 +148,15 @@ function recordRelease(report, outcome, location) {
     return
   }
 
+  if (outcome.detail) {
+    const detail = `${outcome.detail} at ${location}`
+    report.server.ok = false
+    report.server.broker.shutdown = { ok: false, detail }
+    report.server.detail += `; ${detail}`
+    addGap(report, detail)
+    return
+  }
+
   report.server.broker.shutdown = `not attempted (${referenceSummary(outcome.remaining)})`
   report.server.detail += `; doctor released its broker reference; the broker remains running because ${referenceSummary(outcome.remaining)}`
 }
@@ -137,6 +168,8 @@ export async function runDoctor({
   ensureBrokerFn = ensureBroker,
   addRefFn = addRef,
   releaseRefFn = releaseRef,
+  listAgentsFn = async ({ broker }) => serverAgents(broker),
+  reviewAgent = REVIEW_AGENT,
   inspectBrokerFn = inspectBroker,
   listProvidersFn = listProviders,
   envProviderHintsFn = envProviderHints,
@@ -228,10 +261,28 @@ export async function runDoctor({
         const location = brokerLocation(broker, observed)
         const observation = observed?.state ?? 'not observed'
         const observationDetail = observed?.detail ? ` (${observed.detail})` : ''
+        const availableAgents = await listAgentsFn({ broker, env })
+        const reviewAgentAvailable = availableAgents.includes(reviewAgent)
         report.server = {
-          ok: true,
-          detail: `reachable at ${location}; broker observation was ${observation}${observationDetail}`,
+          ok: reviewAgentAvailable,
+          detail: reviewAgentAvailable
+            ? `reachable at ${location}; broker observation was ${observation}${observationDetail}; review agent ${reviewAgent} is available`
+            : `reachable at ${location}, but configured review agent ${reviewAgent} is absent; server offers: ${availableAgents.join(', ') || '(none)'}`,
           broker: brokerReport(observation, location),
+          reviewAgent: {
+            configured: reviewAgent,
+            available: availableAgents,
+            ok: reviewAgentAvailable,
+            detail: reviewAgentAvailable
+              ? `${reviewAgent} is available`
+              : `${reviewAgent} is absent; available agents: ${availableAgents.join(', ') || '(none)'}`,
+          },
+        }
+        if (!reviewAgentAvailable) {
+          addGap(
+            report,
+            `configured review agent ${reviewAgent} is absent on the opencode server; available agents: ${availableAgents.join(', ') || '(none)'}`,
+          )
         }
       } catch (error) {
         probeFailed = referenceHeld

@@ -92,7 +92,7 @@ test('live: a real review returns findings or a clean report', { skip: !live && 
     env,
     timeoutMs: 300000,
   })
-  assert.equal(r.code, 0, r.stderr)
+  assert.equal(r.code, 0, `${r.stdout}\n${r.stderr}`)
   assert.match(r.stdout, /opencode review/)
   assert.ok(r.stdout.length > 40, 'the review produced no meaningful output')
 })
@@ -105,6 +105,6 @@ test('live: a real task returns model output', { skip: !live && 'set OPENCODE_LI
     env,
     timeoutMs: 300000,
   })
-  assert.equal(r.code, 0, r.stderr)
+  assert.equal(r.code, 0, `${r.stdout}\n${r.stderr}`)
   assert.match(r.stdout.toLowerCase(), /ready/)
 })

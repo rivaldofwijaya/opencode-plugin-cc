@@ -20,7 +20,8 @@ import {
   lockPath,
   refsPath,
 } from '../../scripts/lib/broker-endpoint.mjs'
-import { isAlive, spawnDetached, terminate } from '../../scripts/lib/process.mjs'
+import { isAlive, terminate } from '../../scripts/lib/process.mjs'
+import { spawnTracked, withFakeOwnedBroker } from '../helpers/process-cleanup.mjs'
 import { brokerDir, readJson, writeJson, sessionsDir } from '../../scripts/lib/state.mjs'
 
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
@@ -73,25 +74,6 @@ async function waitForChildPid(path, startup) {
       startupSettled,
     ])
     if (settled) throw new Error('broker startup settled before its child PID was recorded')
-  }
-}
-
-async function withFakeOwnedBroker(env, callback) {
-  const child = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
-  const password = 'test-password'
-  const startedAt = Date.now()
-  await writeEndpoint({ port: 1, pid: child.pid, password, startedAt }, env)
-  await writeJson(join(brokerDir(env), 'owner.json'), {
-    pid: child.pid,
-    port: 1,
-    startedAt,
-    passwordHash: createHash('sha256').update(password).digest('hex'),
-  })
-  try {
-    return await callback({ pid: child.pid })
-  } finally {
-    await shutdownBroker(env)
-    if (isAlive(child.pid)) await terminate(child.pid, { graceMs: 1000 })
   }
 }
 
@@ -148,10 +130,10 @@ test('releaseRef prunes refs for sessions no longer registered', async () => {
   assert.deepEqual(Object.values(refs.live), [{ pid: null, at: 1 }])
 })
 
-test('two holders in one session keep the broker alive until both release', async () => {
+test('two holders in one session keep the broker alive until both release', async (t) => {
   const env = await sandbox()
   await registerSessions(env, 'cc-shared')
-  await withFakeOwnedBroker(env, async (broker) => {
+  await withFakeOwnedBroker(t, env, async (broker) => {
     await addRef('cc-shared', env, 'holder-first')
     await addRef('cc-shared', env, 'holder-second')
 
@@ -166,12 +148,12 @@ test('two holders in one session keep the broker alive until both release', asyn
   })
 })
 
-test('tokenless release does not steal a live holder owned by another pid', async () => {
+test('tokenless release does not steal a live holder owned by another pid', async (t) => {
   const env = await sandbox()
   await registerSessions(env, 'cc-two-live')
-  await withFakeOwnedBroker(env, async (broker) => {
-    const first = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
-    const second = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  await withFakeOwnedBroker(t, env, async (broker) => {
+    const first = spawnTracked(t, process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+    const second = spawnTracked(t, process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
     try {
       await writeJson(refsPath(env), {
         'cc-two-live': {
@@ -192,10 +174,10 @@ test('tokenless release does not steal a live holder owned by another pid', asyn
   })
 })
 
-test('tokenless release can release the sole migrated legacy holder', async () => {
+test('tokenless release can release the sole migrated legacy holder', async (t) => {
   const env = await sandbox()
   await registerSessions(env, 'cc-legacy-only')
-  await withFakeOwnedBroker(env, async (broker) => {
+  await withFakeOwnedBroker(t, env, async (broker) => {
     await writeJson(refsPath(env), { 'cc-legacy-only': Date.now() })
 
     const result = await releaseRef('cc-legacy-only', env)
@@ -206,11 +188,11 @@ test('tokenless release can release the sole migrated legacy holder', async () =
   })
 })
 
-test('tokenless release prefers this process holder over another live pid', async () => {
+test('tokenless release prefers this process holder over another live pid', async (t) => {
   const env = await sandbox()
   await registerSessions(env, 'cc-owned')
-  await withFakeOwnedBroker(env, async (broker) => {
-    const foreign = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  await withFakeOwnedBroker(t, env, async (broker) => {
+    const foreign = spawnTracked(t, process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
     try {
       await writeJson(refsPath(env), {
         'cc-owned': {
@@ -231,11 +213,11 @@ test('tokenless release prefers this process holder over another live pid', asyn
   })
 })
 
-test('dead holders are pruned before they can pin the broker', async () => {
+test('dead holders are pruned before they can pin the broker', async (t) => {
   const env = await sandbox()
   await registerSessions(env, 'cc-dead', 'cc-live')
-  await withFakeOwnedBroker(env, async (broker) => {
-    const dead = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  await withFakeOwnedBroker(t, env, async (broker) => {
+    const dead = spawnTracked(t, process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
     await terminate(dead.pid, { graceMs: 1000 })
     assert.equal(isAlive(dead.pid), false)
     await writeJson(refsPath(env), {
@@ -255,11 +237,11 @@ test('dead holders are pruned before they can pin the broker', async () => {
   })
 })
 
-test('an explicit no-op release shuts down after pruning the last dead holder', async () => {
+test('an explicit no-op release shuts down after pruning the last dead holder', async (t) => {
   const env = await sandbox()
   await registerSessions(env, 'cc-dead-explicit')
-  await withFakeOwnedBroker(env, async (broker) => {
-    const dead = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  await withFakeOwnedBroker(t, env, async (broker) => {
+    const dead = spawnTracked(t, process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
     await terminate(dead.pid, { graceMs: 1000 })
     await writeJson(refsPath(env), {
       'cc-dead-explicit': {
@@ -273,11 +255,11 @@ test('an explicit no-op release shuts down after pruning the last dead holder', 
   })
 })
 
-test('a tokenless no-op release shuts down after pruning the last dead holder', async () => {
+test('a tokenless no-op release shuts down after pruning the last dead holder', async (t) => {
   const env = await sandbox()
   await registerSessions(env, 'cc-dead-tokenless')
-  await withFakeOwnedBroker(env, async (broker) => {
-    const dead = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  await withFakeOwnedBroker(t, env, async (broker) => {
+    const dead = spawnTracked(t, process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
     await terminate(dead.pid, { graceMs: 1000 })
     await writeJson(refsPath(env), {
       'cc-dead-tokenless': {
@@ -291,12 +273,12 @@ test('a tokenless no-op release shuts down after pruning the last dead holder', 
   })
 })
 
-test('a no-op release leaves another live holder and the broker untouched', async () => {
+test('a no-op release leaves another live holder and the broker untouched', async (t) => {
   const env = await sandbox()
   await registerSessions(env, 'cc-dead-with-live', 'cc-live-with-dead')
-  await withFakeOwnedBroker(env, async (broker) => {
-    const dead = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
-    const live = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  await withFakeOwnedBroker(t, env, async (broker) => {
+    const dead = spawnTracked(t, process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+    const live = spawnTracked(t, process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
     await terminate(dead.pid, { graceMs: 1000 })
     const liveAt = Date.now() + 1
     try {
@@ -324,9 +306,9 @@ test('a no-op release leaves another live holder and the broker untouched', asyn
   })
 })
 
-test('repair never prunes a live non-session holder', async () => {
+test('repair never prunes a live non-session holder', async (t) => {
   const env = await sandbox()
-  const live = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  const live = spawnTracked(t, process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
   const at = Date.now()
   try {
     await writeJson(refsPath(env), {
@@ -343,9 +325,9 @@ test('repair never prunes a live non-session holder', async () => {
   }
 })
 
-test('repair reclaims a session holder pinned to a live unrelated process', async () => {
+test('repair reclaims a session holder pinned to a live unrelated process', async (t) => {
   const env = await sandbox()
-  const unrelated = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  const unrelated = spawnTracked(t, process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
   try {
     await writeJson(refsPath(env), {
       'cc-crashed': {
@@ -396,9 +378,9 @@ test('repair reclaims an expired migrated legacy holder', async () => {
   assert.deepEqual(await readJson(refsPath(env), {}), {})
 })
 
-test('session refs reject an unrelated configured PID and receive an expiry', async () => {
+test('session refs reject an unrelated configured PID and receive an expiry', async (t) => {
   const env = await sandbox()
-  const unrelated = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  const unrelated = spawnTracked(t, process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
   try {
     env.CLAUDE_CODE_SESSION_PID = String(unrelated.pid)
     await addSessionRef('cc-identity', env, 'session:cc-identity')
@@ -422,9 +404,9 @@ test('old session timestamps migrate to independent holders without throwing', a
   assert.deepEqual(refs.legacy['new-holder'], { pid: process.pid, at: refs.legacy['new-holder'].at })
 })
 
-test('reapOrphans does not remove a live broker lock', async () => {
+test('reapOrphans does not remove a live broker lock', async (t) => {
   const env = await sandbox()
-  const child = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  const child = spawnTracked(t, process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
   try {
     await writeEndpoint({ port: 1, pid: 2 ** 22, password: 'p', startedAt: 0 }, env)
     await mkdir(join(env.XDG_STATE_HOME, 'opencode-plugin-cc', 'broker'), { recursive: true })
@@ -444,10 +426,71 @@ test('reapOrphans clears a portfile whose pid is dead', async () => {
   assert.equal(await readEndpoint(env), null)
 })
 
-test('reapOrphans repairs stale refs and stops a broker held only by them', async () => {
+test('reapOrphans never signals a live unrelated process in a recycled-pid record', async (t) => {
   const env = await sandbox()
-  await withFakeOwnedBroker(env, async (broker) => {
-    const dead = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  const stranger = spawnTracked(t, process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  const password = 'test-password'
+  const startedAt = Date.now()
+  try {
+    await writeEndpoint({ port: 1, pid: stranger.pid, password, startedAt }, env)
+    await writeJson(join(brokerDir(env), 'owner.json'), {
+      pid: stranger.pid,
+      port: 1,
+      startedAt,
+      passwordHash: createHash('sha256').update(password).digest('hex'),
+    })
+
+    assert.deepEqual(await reapOrphans(env), {
+      cleared: false,
+      protected: true,
+      detail: 'broker process identity could not be proven; records remain for repair',
+    })
+    assert.equal(isAlive(stranger.pid), true)
+    assert.equal((await readEndpoint(env)).pid, stranger.pid)
+    await terminate(stranger.pid, { graceMs: 1000 })
+    assert.deepEqual(await reapOrphans(env), { cleared: true })
+    assert.equal(await readEndpoint(env), null)
+  } finally {
+    if (isAlive(stranger.pid)) await terminate(stranger.pid, { graceMs: 1000 })
+    await shutdownBroker(env)
+  }
+})
+
+test('reapOrphans refuses a matching command with a mismatched process start time', async (t) => {
+  const env = await sandbox()
+  await withFakeOwnedBroker(t, env, async ({ startedAt }) => {
+    const stranger = spawnTracked(t, process.execPath, [
+      '-e', 'setInterval(() => {}, 1000)',
+      'serve', '--port', '0', '--hostname', '127.0.0.1',
+    ])
+    const endpoint = await readEndpoint(env)
+    const mismatchedStartedAt = startedAt - 60_000
+    await writeEndpoint({ ...endpoint, pid: stranger.pid, startedAt: mismatchedStartedAt }, env)
+    await writeJson(join(brokerDir(env), 'owner.json'), {
+      pid: stranger.pid,
+      port: endpoint.port,
+      startedAt: mismatchedStartedAt,
+      passwordHash: createHash('sha256').update(endpoint.password).digest('hex'),
+    })
+
+    assert.deepEqual(await reapOrphans(env), {
+      cleared: false,
+      protected: true,
+      detail: 'broker process identity could not be proven; records remain for repair',
+    })
+    assert.equal(isAlive(stranger.pid), true)
+    assert.equal((await readEndpoint(env)).pid, stranger.pid)
+
+    await terminate(stranger.pid, { graceMs: 1000 })
+    assert.deepEqual(await reapOrphans(env), { cleared: true })
+    assert.equal(await readEndpoint(env), null)
+  })
+})
+
+test('reapOrphans repairs stale refs and stops a broker held only by them', async (t) => {
+  const env = await sandbox()
+  await withFakeOwnedBroker(t, env, async (broker) => {
+    const dead = spawnTracked(t, process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
     await terminate(dead.pid, { graceMs: 1000 })
     await writeJson(refsPath(env), {
       'cc-stale': { 'dead-holder': { pid: dead.pid, at: Date.now() } },

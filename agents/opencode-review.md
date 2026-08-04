@@ -1,5 +1,5 @@
 ---
-description: Read-only reviewer used by opencode-plugin-cc. Reports defects; never edits.
+description: Claude Code read-only reviewer definition; the plugin's opencode review uses the built-in general agent. Reports defects; never edits.
 mode: subagent
 tools:
   read: true

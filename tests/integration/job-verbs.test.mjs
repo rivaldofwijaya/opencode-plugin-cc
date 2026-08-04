@@ -13,6 +13,7 @@ import {
 } from '../../scripts/lib/tracked-jobs.mjs'
 import { jobDir, readJson, writeJson } from '../../scripts/lib/state.mjs'
 import { refsPath } from '../../scripts/lib/broker-endpoint.mjs'
+import { spawnTracked } from '../helpers/process-cleanup.mjs'
 
 const companion = fileURLToPath(new URL('../../scripts/opencode-companion.mjs', import.meta.url))
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
@@ -273,9 +274,9 @@ test('cancel refuses a job from another Claude Code session', async () => {
   assert.equal((await readJob(job.id, s.env)).state, 'running')
 })
 
-test('cancel does not signal a running process without verified worker ownership', async () => {
+test('cancel does not signal a running process without verified worker ownership', async (t) => {
   const s = await sandbox()
-  const foreign = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  const foreign = spawnTracked(t, process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
   try {
     const job = await record(s.env)
     await updateJob(job.id, { pid: foreign.pid, sessionID: 'foreign-session' }, s.env)
@@ -290,11 +291,11 @@ test('cancel does not signal a running process without verified worker ownership
   }
 })
 
-test('cancel signals a worker only when its owner record and command line agree', async () => {
+test('cancel signals a worker only when its owner record and command line agree', async (t) => {
   const s = await sandbox()
   const mismatchedJob = await record(s.env)
   const mismatchedToken = 'expected-worker-token'
-  const mismatchedWorker = spawnDetached(process.execPath, [
+  const mismatchedWorker = spawnTracked(t, process.execPath, [
     '-e', 'setInterval(() => {}, 1000)',
     '--',
     '--opencode-job-worker', mismatchedJob.id, 'different-worker-token',
@@ -302,7 +303,7 @@ test('cancel signals a worker only when its owner record and command line agree'
   let worker
   const job = await record(s.env)
   const workerToken = 'verified-worker-token'
-  worker = spawnDetached(process.execPath, [
+  worker = spawnTracked(t, process.execPath, [
     '-e', 'setInterval(() => {}, 1000)',
     '--',
     '--opencode-job-worker', job.id, workerToken,

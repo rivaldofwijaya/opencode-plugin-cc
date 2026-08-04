@@ -271,7 +271,7 @@ test('review --background creates a retrievable job record', async (t) => {
     assert.equal(job.id, jobId)
     assert.equal(job.verb, 'review')
     assert.equal(job.meta.truncated, false)
-    assert.equal((await workerRequest(jobId, s.env)).agent, 'opencode-review')
+    assert.equal((await workerRequest(jobId, s.env)).agent, 'general')
     assert.match(r.stdout, /\/opencode:result/)
   } finally {
     await cleanupJob(jobId, s.env)

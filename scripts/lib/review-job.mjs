@@ -4,9 +4,9 @@ import { loadPrompt } from './prompts.mjs'
 import { readJob, readResult } from './tracked-jobs.mjs'
 import { parseReviewOutput } from './review-schema.mjs'
 import { renderReview } from './render.mjs'
-import { CompanionError } from './doctor.mjs'
+import { CompanionError, REVIEW_AGENT } from './doctor.mjs'
 
-export const REVIEW_AGENT = 'opencode-review'
+export { REVIEW_AGENT }
 
 export const REVIEW_TOOLS = {
   read: true, grep: true, glob: true, list: true,
