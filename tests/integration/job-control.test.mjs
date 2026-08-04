@@ -67,7 +67,7 @@ test('a foreground job runs to done and captures text, events, and counters', as
     assert.equal(job.state, 'done')
     assert.ok(job.pid === process.pid)
     assert.ok(job.counters.steps >= 1)
-    assert.ok(job.counters.tools >= 1)
+    assert.equal(job.counters.tools, 0)
     assert.ok(job.counters.outputTokens > 0)
     const result = await readResult(job.id, env)
     assert.match(result, /"findings"/)
@@ -90,7 +90,7 @@ test('a foreground failure releases its broker reference', async (t) => {
   const scriptPath = join(env.XDG_STATE_HOME, 'failure-events.jsonl')
   await writeFile(scriptPath, `${JSON.stringify({
     type: 'session.error',
-    properties: { error: { name: 'FixtureFailure' } },
+    properties: { error: { name: 'UnknownError', data: { message: 'fixture failure detail' } } },
   })}\n`)
   const startingRefs = await readJson(refsPath(env), {})
   let job
@@ -103,6 +103,7 @@ test('a foreground failure releases its broker reference', async (t) => {
       env: { ...env, FAKE_OPENCODE_SCRIPT: scriptPath },
     })
     assert.equal(job.state, 'failed')
+    assert.equal(job.error, 'fixture failure detail')
     assert.deepEqual(await readJson(refsPath(env), {}), startingRefs)
   } catch (error) {
     if (bindFailure(error)) {
@@ -440,7 +441,7 @@ test('an SSE disconnect mid-job reconnects and reaches a terminal state', async 
 })
 
 test('worker acquires its own ref before the launcher exits', async (t) => {
-  const env = await sandbox({ FAKE_OPENCODE_EVENT_DELAY_MS: '1000' })
+  const env = await sandbox({ FAKE_OPENCODE_EVENT_DELAY_MS: '500' })
   let jobId
   try {
     const jobControlUrl = new URL('../../scripts/lib/job-control.mjs', import.meta.url).href

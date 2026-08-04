@@ -6,41 +6,138 @@ import { join } from 'node:path'
 const argv = process.argv.slice(2)
 const fault = process.env.FAKE_OPENCODE_FAULT || ''
 const version = process.env.FAKE_OPENCODE_VERSION || '1.18.11'
+const USER_MESSAGE_ID = 'msg_fake_user'
 const ASSISTANT_MESSAGE_ID = 'msg_fake_1'
+const USER_PART_ID = 'prt_fake_user'
+const REASONING_PART_ID = 'prt_fake_reasoning'
+const TEXT_PART_ID = 'prt_fake_text'
+const STEP_FINISH_PART_ID = 'prt_fake_step_finish'
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const DEFAULT_SCRIPT = [
   {
-    type: 'session.next.step.started',
+    type: 'message.updated',
+    properties: { info: { id: USER_MESSAGE_ID, role: 'user' } },
+  },
+  {
+    type: 'message.part.updated',
     properties: {
-      assistantMessageID: ASSISTANT_MESSAGE_ID,
-      agent: 'opencode-review',
-      model: { providerID: 'fake', modelID: 'fake-1' },
+      part: {
+        id: USER_PART_ID,
+        messageID: USER_MESSAGE_ID,
+        type: 'text',
+        text: 'review',
+      },
     },
   },
   {
-    type: 'session.next.tool.called',
-    properties: { callID: 'call_1', tool: 'read', input: { path: 'src/a.js' } },
-  },
-  {
-    type: 'session.next.text.delta',
-    properties: { assistantMessageID: ASSISTANT_MESSAGE_ID, textID: 'txt_1', delta: '{"findings":[' },
-  },
-  {
-    type: 'session.next.text.delta',
+    type: 'message.updated',
     properties: {
-      assistantMessageID: ASSISTANT_MESSAGE_ID,
-      textID: 'txt_1',
+      info: {
+        id: ASSISTANT_MESSAGE_ID,
+        role: 'assistant',
+        tokens: { input: 0, output: 0 },
+      },
+    },
+  },
+  {
+    type: 'message.part.delta',
+    properties: {
+      messageID: ASSISTANT_MESSAGE_ID,
+      partID: REASONING_PART_ID,
+      field: 'text',
+      delta: 'checking the changed file',
+    },
+  },
+  {
+    type: 'message.part.delta',
+    properties: {
+      messageID: ASSISTANT_MESSAGE_ID,
+      partID: REASONING_PART_ID,
+      field: 'text',
+      delta: ' before answering',
+    },
+  },
+  {
+    type: 'message.part.updated',
+    properties: {
+      part: {
+        id: REASONING_PART_ID,
+        messageID: ASSISTANT_MESSAGE_ID,
+        type: 'reasoning',
+        text: 'checking the changed file before answering',
+      },
+    },
+  },
+  {
+    type: 'message.part.updated',
+    properties: {
+      part: {
+        id: TEXT_PART_ID,
+        messageID: ASSISTANT_MESSAGE_ID,
+        type: 'text',
+        text: '',
+      },
+    },
+  },
+  {
+    type: 'message.part.delta',
+    properties: {
+      messageID: ASSISTANT_MESSAGE_ID,
+      partID: TEXT_PART_ID,
+      field: 'text',
+      delta: '{"findings":[',
+    },
+  },
+  {
+    type: 'message.part.delta',
+    properties: {
+      messageID: ASSISTANT_MESSAGE_ID,
+      partID: TEXT_PART_ID,
+      field: 'text',
       delta: '{"file":"src/a.js","line":10,"severity":"high","confidence":"high","body":"Null deref."}',
     },
   },
   {
-    type: 'session.next.text.delta',
-    properties: { assistantMessageID: ASSISTANT_MESSAGE_ID, textID: 'txt_1', delta: ']}' },
+    type: 'message.part.delta',
+    properties: {
+      messageID: ASSISTANT_MESSAGE_ID,
+      partID: TEXT_PART_ID,
+      field: 'text',
+      delta: ']}',
+    },
+  },
+  {
+    type: 'message.part.updated',
+    properties: {
+      part: {
+        id: TEXT_PART_ID,
+        messageID: ASSISTANT_MESSAGE_ID,
+        type: 'text',
+        text: '{"findings":[{"file":"src/a.js","line":10,"severity":"high","confidence":"high","body":"Null deref."}]}',
+      },
+    },
+  },
+  {
+    type: 'message.part.updated',
+    properties: {
+      part: {
+        id: STEP_FINISH_PART_ID,
+        messageID: ASSISTANT_MESSAGE_ID,
+        type: 'step-finish',
+        tokens: { total: 20, input: 12, output: 8, reasoning: 3 },
+      },
+    },
   },
   {
     type: 'message.updated',
-    properties: { info: { role: 'assistant', tokens: { input: 120, output: 45 }, cost: 0.0001 } },
+    properties: {
+      info: {
+        id: ASSISTANT_MESSAGE_ID,
+        role: 'assistant',
+        tokens: { total: 20, input: 12, output: 8, reasoning: 3 },
+      },
+    },
   },
   { type: 'session.idle', properties: {} },
 ]
@@ -133,44 +230,81 @@ if (argv[0] === 'serve') {
   const script = loadScript()
   const sessions = new Map()
   const listeners = new Set()
+  let disconnectInjected = false
 
   function broadcast(payload) {
     const frame = `data: ${JSON.stringify({ payload: { id: 'evt_fake', ...payload } })}\n\n`
     for (const response of listeners) {
-      if (!response.destroyed) response.write(frame)
+      if (response.destroyed) continue
+      if (fault === 'partial-line') {
+        const midpoint = Math.max(1, Math.floor(frame.length / 2))
+        response.write(frame.slice(0, midpoint))
+        response.write(frame.slice(midpoint))
+      } else {
+        response.write(frame)
+      }
     }
   }
 
   async function replay(sessionID) {
-    for (const event of script) {
-      const session = sessions.get(sessionID)
-      if (session?.aborted) {
-        broadcast({
-          type: 'session.error',
-          properties: { sessionID, error: { name: 'MessageAbortedError' } },
-        })
-        return
-      }
-
-      const properties = { sessionID, ...event.properties }
-      if (
-        (event.type === 'session.next.step.started' || event.type === 'session.next.text.delta')
-        && properties.assistantMessageID === undefined
-      ) {
-        properties.assistantMessageID = ASSISTANT_MESSAGE_ID
-      }
-      if (fault === 'malformed-json' && event.type === 'session.next.text.delta') {
-        properties.delta = 'not json at all'
-      }
-      broadcast({ type: event.type, properties })
-
-      if (fault === 'sse-disconnect' && event.type === 'session.next.tool.called') {
-        for (const response of listeners) {
-          response.destroy()
-          listeners.delete(response)
+    const session = sessions.get(sessionID)
+    if (!session || session.replaying) return
+    session.replaying = true
+    try {
+      for (const event of script) {
+        if (session.aborted) {
+          broadcast({
+            type: 'session.error',
+            properties: { sessionID, error: { name: 'MessageAbortedError' } },
+          })
+          return
         }
+
+        const properties = { sessionID, ...event.properties }
+        if (event.type === 'message.updated') {
+          properties.info = {
+            id: ASSISTANT_MESSAGE_ID,
+            role: 'assistant',
+            ...properties.info,
+            sessionID: properties.info?.sessionID ?? sessionID,
+          }
+        }
+        if (event.type === 'message.part.delta') {
+          properties.messageID ??= ASSISTANT_MESSAGE_ID
+          properties.partID ??= TEXT_PART_ID
+          properties.field ??= 'text'
+        }
+        if (event.type === 'message.part.updated') {
+          properties.part = {
+            id: TEXT_PART_ID,
+            messageID: ASSISTANT_MESSAGE_ID,
+            sessionID,
+            type: 'text',
+            ...properties.part,
+            sessionID: properties.part?.sessionID ?? sessionID,
+          }
+        }
+        if (fault === 'malformed-json' && event.type === 'message.part.delta') {
+          properties.delta = 'not json at all'
+        }
+        broadcast({ type: event.type, properties })
+
+        if (
+          fault === 'sse-disconnect'
+          && !disconnectInjected
+          && event.type === 'message.part.delta'
+        ) {
+          disconnectInjected = true
+          for (const response of listeners) {
+            response.destroy()
+            listeners.delete(response)
+          }
+          break
+        }
+        await sleep(Number(process.env.FAKE_OPENCODE_EVENT_DELAY_MS || 5))
       }
-      await sleep(Number(process.env.FAKE_OPENCODE_EVENT_DELAY_MS || 5))
+    } finally {
+      session.replaying = false
     }
   }
 
@@ -194,6 +328,10 @@ if (argv[0] === 'serve') {
       res.write(`data: ${JSON.stringify({ payload: { id: 'evt_fake', type: 'server.connected', properties: {} } })}\n\n`)
       listeners.add(res)
       req.on('close', () => listeners.delete(res))
+      if (fault === 'sse-disconnect') {
+        const pending = [...sessions.entries()].find(([, session]) => session.prompted && !session.replaying)
+        if (pending) void replay(pending[0])
+      }
       return
     }
 
@@ -208,13 +346,14 @@ if (argv[0] === 'serve') {
     const match = url.pathname.match(/^\/session\/([^/]+)\/(prompt_async|abort)$/)
     if (match && req.method === 'POST') {
       const [, id, action] = match
-      if (!sessions.has(id)) sessions.set(id, { aborted: false })
+      if (!sessions.has(id)) sessions.set(id, { aborted: false, prompted: false, replaying: false })
       recordRequest({ type: action === 'prompt_async' ? 'prompt' : 'abort', sessionID: id })
       req.resume()
       if (action === 'abort') {
         sessions.get(id).aborted = true
         return send(200, true)
       }
+      sessions.get(id).prompted = true
       void replay(id)
       return send(200, { messageID: ASSISTANT_MESSAGE_ID })
     }

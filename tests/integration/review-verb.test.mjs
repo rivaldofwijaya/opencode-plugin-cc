@@ -62,7 +62,31 @@ async function configureScript(sandbox, events) {
 
 async function configureResponse(sandbox, response) {
   await configureScript(sandbox, [
-    { type: 'session.next.text.delta', properties: { delta: response } },
+    {
+      type: 'message.updated',
+      properties: { info: { id: 'msg_fake_1', role: 'assistant' } },
+    },
+    {
+      type: 'message.part.updated',
+      properties: {
+        part: { id: 'prt_fake_text', messageID: 'msg_fake_1', type: 'text' },
+      },
+    },
+    {
+      type: 'message.part.delta',
+      properties: {
+        messageID: 'msg_fake_1',
+        partID: 'prt_fake_text',
+        field: 'text',
+        delta: response,
+      },
+    },
+    {
+      type: 'message.part.updated',
+      properties: {
+        part: { id: 'prt_fake_text', messageID: 'msg_fake_1', type: 'text', text: response },
+      },
+    },
     { type: 'session.idle', properties: {} },
   ])
 }

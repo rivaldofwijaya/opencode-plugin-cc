@@ -125,8 +125,14 @@ test('parseSseChunk returns identical events for arbitrary chunk boundaries', ()
 
 test('events preserves UTF-8 characters split across reads', async () => {
   const payload = {
-    type: 'session.next.text.delta',
-    properties: { text: 'before 🧪 after 中文' },
+    type: 'message.part.delta',
+    properties: {
+      sessionID: 'ses_test',
+      messageID: 'msg_test',
+      partID: 'prt_test',
+      field: 'text',
+      delta: 'before 🧪 after 中文',
+    },
   }
   const encoded = new TextEncoder().encode(sseFrame(payload))
   const marker = new TextEncoder().encode('🧪')
@@ -252,7 +258,7 @@ describe('live fixture server', { skip: !loopbackAvailable }, () => {
     await connectedPromise
     await client.promptAsync(session.id, { parts: [{ type: 'text', text: 'review this' }] })
     await streaming
-    assert.ok(seen.includes('session.next.tool.called'))
+    assert.ok(seen.includes('message.part.updated'))
     assert.ok(seen.includes('session.idle'))
   })
 
@@ -297,7 +303,7 @@ describe('live fixture server', { skip: !loopbackAvailable }, () => {
       await connectedPromise
       await client.promptAsync(session.id, { parts: [{ type: 'text', text: 'review this' }] })
       await streaming
-      assert.equal(seen.filter((payload) => payload.type === 'session.next.text.delta').length, 3)
+      assert.equal(seen.filter((payload) => payload.type === 'message.part.delta').length, 5)
       assert.equal(seen.at(-1).type, 'session.idle')
     } finally {
       await stopFixture(fixture)

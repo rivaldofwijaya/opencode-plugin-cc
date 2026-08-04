@@ -1,4 +1,5 @@
-// Wire types for the opencode HTTP server, transcribed from GET /doc on 1.18.11.
+// Wire types for the opencode HTTP server, grounded in the captured
+// /global/event stream from a real opencode 1.18.13 run on 2026-08-04.
 // Documentation only — this file is never compiled or imported at runtime.
 
 export interface SessionCreateRequest {
@@ -36,9 +37,38 @@ export interface EventPayload<T = Record<string, unknown>> {
 }
 
 // Types observed in practice, in the order a job sees them:
-export type StepStarted = EventPayload<{ sessionID: string; assistantMessageID: string; agent?: string; model?: { providerID: string; modelID: string } }>
-export type ToolCalled = EventPayload<{ sessionID: string; callID: string; tool: string; input?: Record<string, unknown> }>
-export type TextDelta = EventPayload<{ sessionID: string; assistantMessageID: string; textID: string; delta?: string }>
-export type MessageUpdated = EventPayload<{ sessionID: string; info: { role: string; tokens?: { input?: number; output?: number }; cost?: number } }>
+export type MessagePartDelta = EventPayload<{
+  sessionID: string
+  messageID: string
+  partID: string
+  field: 'text'
+  delta?: string
+}>
+export interface MessagePart {
+  id: string
+  messageID: string
+  sessionID: string
+  type: 'text' | 'reasoning' | 'step-finish' | 'tool'
+  text?: string
+  tokens?: { total?: number; input?: number; output?: number; reasoning?: number; cache?: Record<string, number> }
+  [key: string]: unknown
+}
+export type MessagePartUpdated = EventPayload<{
+  sessionID: string
+  time?: number
+  part: MessagePart
+}>
+export type MessageUpdated = EventPayload<{
+  sessionID: string
+  info: {
+    id: string
+    role: string
+    tokens?: { total?: number; input?: number; output?: number; reasoning?: number; cache?: Record<string, number> }
+    cost?: number
+  }
+}>
 export type SessionIdle = EventPayload<{ sessionID: string }>
-export type SessionError = EventPayload<{ sessionID: string; error?: { name?: string; data?: unknown } }>
+export type SessionError = EventPayload<{
+  sessionID: string
+  error?: { name?: string; message?: string; data?: { message?: string; [key: string]: unknown } }
+}>
