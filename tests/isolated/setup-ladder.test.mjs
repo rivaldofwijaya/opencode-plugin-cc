@@ -40,6 +40,13 @@ async function isolated(extra = {}) {
 }
 
 const cli = (env, args, cwd) => run(process.execPath, [companion, ...args], { env, cwd, timeoutMs: 120000 })
+const warn = (message) => {
+  try {
+    process.stderr.write(`${message}\n`)
+  } catch {
+    // Cleanup warnings must never turn into a test failure.
+  }
+}
 
 afterEach(async () => {
   const pending = [...sandboxes]
@@ -47,13 +54,38 @@ afterEach(async () => {
   for (const sandbox of pending) {
     // Repair is scoped to this sandbox's owner/endpoint records. It is the
     // failure-path cleanup for any broker the test may have started.
+    let repair
     try {
-      await cli(sandbox.env, ['repair'])
-    } catch {
-      // Preserve the test failure; the process-list audit after the suite
-      // reports any broker that could not be reclaimed without killing it.
+      repair = await cli(sandbox.env, ['repair'])
+    } catch (error) {
+      warn(
+        `[isolated cleanup] retained home ${sandbox.home}; `
+        + `repair exit code: unavailable (repair threw); `
+        + `repair stderr: ${typeof error?.stderr === 'string' && error.stderr.trim() ? error.stderr.trim() : '(unavailable)'}; `
+        + `error: ${error?.message ?? String(error)}`,
+      )
+      continue
     }
-    await rm(sandbox.home, { recursive: true, force: true })
+
+    if (repair.code !== 0) {
+      warn(
+        `[isolated cleanup] retained home ${sandbox.home}; `
+        + `repair exit code: ${repair.code}; `
+        + `repair stderr: ${repair.stderr.trim() || '(empty)'}`,
+      )
+      continue
+    }
+
+    try {
+      await rm(sandbox.home, { recursive: true, force: true })
+    } catch (error) {
+      warn(
+        `[isolated cleanup] retained home ${sandbox.home}; `
+        + 'repair exit code: 0; '
+        + `repair stderr: ${repair.stderr.trim() || '(empty)'}; `
+        + `home removal failed: ${error?.message ?? String(error)}`,
+      )
+    }
   }
 })
 
