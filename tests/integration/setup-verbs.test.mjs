@@ -4,7 +4,11 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, stat, chmod, rm } from 'n
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { run } from '../../scripts/lib/process.mjs'
+import { isAlive, run, terminate } from '../../scripts/lib/process.mjs'
+import { readEndpoint, writeEndpoint } from '../../scripts/lib/broker-endpoint.mjs'
+import { brokerDir, readJson, writeJson } from '../../scripts/lib/state.mjs'
+import { ensureBroker } from '../../scripts/lib/broker-lifecycle.mjs'
+import { withFakeOwnedBroker } from '../helpers/process-cleanup.mjs'
 import { handlers } from '../../scripts/opencode-companion.mjs'
 
 const companion = fileURLToPath(new URL('../../scripts/opencode-companion.mjs', import.meta.url))
@@ -425,4 +429,34 @@ test('repair clears a stale portfile and reports it', async () => {
   assert.equal(r.code, 0)
   assert.match(r.stdout, /Cleared a stale broker portfile\./)
   await assert.rejects(() => readFile(join(brokerDir, 'port.json')), { code: 'ENOENT' })
+})
+
+test('repair reports an unverified broker and clears it after the process exits', async (t) => {
+  const s = await sandbox()
+  await withFakeOwnedBroker(t, s.env, async ({ pid, startedAt }) => {
+    const endpoint = await readEndpoint(s.env)
+    const mismatchedStartedAt = startedAt - 60_000
+    await writeEndpoint({ ...endpoint, startedAt: mismatchedStartedAt }, s.env)
+    const owner = await readJson(join(brokerDir(s.env), 'owner.json'), {})
+    await writeJson(join(brokerDir(s.env), 'owner.json'), {
+      ...owner,
+      startedAt: mismatchedStartedAt,
+    })
+    await assert.rejects(
+      () => ensureBroker({ env: s.env, timeoutMs: 100 }),
+      /broker process identity could not be proven; records remain for repair/,
+    )
+    const blocked = await cli(s.env, ['repair'])
+    assert.equal(blocked.code, 1)
+    assert.match(blocked.stdout, /Could not prove broker process identity/)
+    assert.match(blocked.stdout, /run \/opencode:repair again/)
+    assert.equal(isAlive(pid), true)
+    assert.equal((await readEndpoint(s.env)).pid, pid)
+
+    await terminate(pid, { graceMs: 1000 })
+    const repaired = await cli(s.env, ['repair'])
+    assert.equal(repaired.code, 0)
+    assert.match(repaired.stdout, /Cleared a stale broker portfile\./)
+    assert.equal(await readEndpoint(s.env), null)
+  })
 })

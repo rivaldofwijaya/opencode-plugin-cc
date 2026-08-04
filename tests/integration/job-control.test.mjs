@@ -4,7 +4,7 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { run, isAlive, terminate, spawnDetached } from '../../scripts/lib/process.mjs'
+import { run, isAlive, terminate } from '../../scripts/lib/process.mjs'
 import { startJob, runForeground, cancelJob } from '../../scripts/lib/job-control.mjs'
 import {
   createJob,
@@ -27,6 +27,7 @@ import {
   releaseLockAt,
 } from '../../scripts/lib/broker-endpoint.mjs'
 import { jobDir, readJson } from '../../scripts/lib/state.mjs'
+import { spawnTracked } from '../helpers/process-cleanup.mjs'
 
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
 const repoCwd = fileURLToPath(new URL('../..', import.meta.url))
@@ -378,9 +379,9 @@ test('cancelling one background worker releases only its broker holder', async (
   }
 })
 
-test('cancelJob does not signal a foreign PID', async () => {
+test('cancelJob does not signal a foreign PID', async (t) => {
   const env = await sandbox()
-  const foreign = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+  const foreign = spawnTracked(t, process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
   try {
     const job = await createJob({
       ccSessionId: 'cc-foreign', verb: 'task', cwd: repoCwd, background: true,

@@ -122,12 +122,12 @@ test('buildRunArgs emits --auto and --dir by default and nothing optional', () =
 
 test('buildRunArgs maps model, variant, agent, session, fork, pure', () => {
   const a = buildRunArgs({
-    dir: '/repo', model: 'openrouter/x', variant: 'high', agent: 'opencode-review',
+    dir: '/repo', model: 'openrouter/x', variant: 'high', agent: 'general',
     session: 'ses_1', fork: true, pure: true
   })
   assert.deepEqual(a, [
     'run', '--dir', '/repo', '--auto', '--pure',
-    '-m', 'openrouter/x', '--variant', 'high', '--agent', 'opencode-review',
+    '-m', 'openrouter/x', '--variant', 'high', '--agent', 'general',
     '--session', 'ses_1', '--fork'
   ])
 })

@@ -175,6 +175,14 @@ function authProviders() {
   }
 }
 
+function agentNames() {
+  const configured = process.env.FAKE_OPENCODE_AGENTS
+  return (configured === undefined ? 'build,explore,general,plan' : configured)
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean)
+}
+
 function recordRequest(request) {
   const path = process.env.FAKE_OPENCODE_REQUEST_LOG
   if (!path) return
@@ -317,6 +325,10 @@ if (argv[0] === 'serve') {
 
     if (url.pathname === '/doc' && req.method === 'GET') {
       return send(200, { openapi: '3.0.0', paths: { '/session': {}, '/global/event': {} } })
+    }
+
+    if (url.pathname === '/agent' && req.method === 'GET') {
+      return send(200, agentNames().map((name) => ({ name })))
     }
 
     if (url.pathname === '/global/event' && req.method === 'GET') {

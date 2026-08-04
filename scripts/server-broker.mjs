@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Spawns `opencode serve` and prints one JSON line: {"port":N,"pid":N}.
+// Spawns `opencode serve` and prints one JSON line with its port, pid, and
+// launch timestamp.
 // Used by broker-lifecycle.ensureBroker. Not a user-facing entrypoint.
 import { resolveBinary, buildServeArgs } from './lib/opencode.mjs'
 import { isAlive, spawnDetached, terminate, TERMINATE_GRACE_MS } from './lib/process.mjs'
@@ -7,6 +8,7 @@ import { writeFile } from 'node:fs/promises'
 
 const password = process.env.OPENCODE_SERVER_PASSWORD || ''
 let child
+let childStartedAt
 let settled = false
 let timer
 let stderrBuf = ''
@@ -32,6 +34,7 @@ async function main() {
       env: { ...process.env, OPENCODE_SERVER_PASSWORD: password },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
+    childStartedAt = Date.now()
   } catch (error) {
     await fail(`broker: could not start opencode serve: ${error.message}\n`)
     return
@@ -74,7 +77,11 @@ async function main() {
     if (!match) return
     settled = true
     clearTimeout(timer)
-    process.stdout.write(JSON.stringify({ port: Number(match[1]), pid: child.pid }) + '\n')
+    process.stdout.write(JSON.stringify({
+      port: Number(match[1]),
+      pid: child.pid,
+      startedAt: childStartedAt,
+    }) + '\n')
     // The server is deliberately detached. The lifecycle owner records its
     // PID and is responsible for terminating it after the final release.
     child.unref()

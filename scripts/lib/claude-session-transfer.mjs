@@ -240,6 +240,6 @@ export async function writeHandoff({ text, ccSessionId, env = process.env }) {
   const dir = join(stateRoot(env), 'transfers')
   const path = handoffPath({ env, ccSessionId: sessionId })
   await ensureDir(dir)
-  await atomicWrite(path, String(text))
+  await atomicWrite(path, String(text), { mode: 0o600 })
   return path
 }

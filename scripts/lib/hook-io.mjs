@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { appendFile, mkdir } from 'node:fs/promises'
+import { appendFile, mkdir, chmod } from 'node:fs/promises'
 import { join } from 'node:path'
 import { stateRoot } from './state.mjs'
 
@@ -136,6 +136,21 @@ function errorMessage(error) {
   return String(error)
 }
 
+export function hookLogPayload({ hook, event, error, env }) {
+  const sourceEnv = env ?? process.env
+  return {
+    hook,
+    event,
+    error: errorMessage(error),
+    // The child already inherits the full environment. Only these values are
+    // needed by logHookFailure to resolve the plugin state root.
+    env: {
+      XDG_STATE_HOME: sourceEnv.XDG_STATE_HOME,
+      HOME: sourceEnv.HOME,
+    },
+  }
+}
+
 export async function logHookFailure({ hook, event, error, env = process.env }) {
   const path = join(stateRoot(env), 'hook-errors.jsonl')
   const record = {
@@ -146,8 +161,10 @@ export async function logHookFailure({ hook, event, error, env = process.env }) 
   }
 
   try {
-    await mkdir(stateRoot(env), { recursive: true })
-    await appendFile(path, JSON.stringify(record) + '\n')
+    await mkdir(stateRoot(env), { recursive: true, mode: 0o700 })
+    await chmod(stateRoot(env), 0o700)
+    await appendFile(path, JSON.stringify(record) + '\n', { mode: 0o600 })
+    await chmod(path, 0o600)
   } catch (loggingError) {
     try {
       process.stderr.write(
@@ -167,12 +184,7 @@ export async function logHookFailureBounded(args, timeoutMs = HOOK_FAILURE_LOG_T
     void Promise.reject(new Error('injected failure-logging rejection'))
     return await new Promise(() => {})
   }
-  const payload = JSON.stringify({
-    hook: args.hook,
-    event: args.event,
-    error: errorMessage(args.error),
-    env: args.env ?? process.env,
-  })
+  const payload = JSON.stringify(hookLogPayload(args))
   const childScript = [
     `import { logHookFailure } from ${JSON.stringify(import.meta.url)}`,
     'await logHookFailure(JSON.parse(process.env.OPENCODE_HOOK_LOG_ARGS))',

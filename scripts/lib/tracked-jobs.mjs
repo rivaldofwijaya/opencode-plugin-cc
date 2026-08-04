@@ -140,7 +140,7 @@ export const readEvents = (jobId, env = process.env) => (
 
 export async function writeResult(jobId, text, env = process.env) {
   await ensureDir(jobDir(jobId, env))
-  await atomicWrite(join(jobDir(jobId, env), 'result.md'), String(text))
+  await atomicWrite(join(jobDir(jobId, env), 'result.md'), String(text), { mode: 0o600 })
 }
 
 export async function readResult(jobId, env = process.env) {

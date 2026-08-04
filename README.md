@@ -22,7 +22,7 @@ stored by opencode under
 - `skills/opencode-server-runtime/SKILL.md` — broker and durable-job recovery guidance.
 - `skills/opencode-result-handling/SKILL.md` — output-preservation guidance.
 - `agents/opencode-rescue.md` — the write-capable rescue forwarder.
-- `agents/opencode-review.md` — the read-only review agent.
+- `agents/opencode-review.md` — the Claude Code read-only review subagent definition; it is not installed into opencode.
 - `scripts/opencode-companion.mjs` — the companion CLI entrypoint.
 - `scripts/lib/doctor.mjs` — binary, credential, model, and server checks.
 - `scripts/lib/gate.mjs` — Stop review gate state.

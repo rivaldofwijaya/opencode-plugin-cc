@@ -5,7 +5,8 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { run, spawnDetached, terminate, isAlive } from '../../scripts/lib/process.mjs'
+import { run, terminate, isAlive } from '../../scripts/lib/process.mjs'
+import { spawnTracked } from '../helpers/process-cleanup.mjs'
 
 const bin = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
 
@@ -150,7 +151,7 @@ test('fixture can use provider env as an override when auth.json is absent', asy
   }
 })
 
-test('fixture gives identical results for space and equals-valued serve flags', { skip: !loopbackAvailable }, async () => {
+test('fixture gives identical results for space and equals-valued serve flags', { skip: !loopbackAvailable }, async (t) => {
   const port = await availablePort()
   const results = []
   const invocations = [
@@ -159,7 +160,7 @@ test('fixture gives identical results for space and equals-valued serve flags', 
   ]
 
   for (const args of invocations) {
-    const child = spawnDetached(bin, args, {
+    const child = spawnTracked(t, bin, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
     })
 
@@ -184,8 +185,8 @@ test('fixture does not silently ignore an equals-form port value', async () => {
   assert.match(r.stderr, /ERR_SOCKET_BAD_PORT/)
 })
 
-test('fixture serve answers /doc and replays typed SSE events', { skip: !loopbackAvailable }, async () => {
-  const child = spawnDetached(bin, ['serve', '--port', '0', '--hostname', '127.0.0.1'], {
+test('fixture serve answers /doc and replays typed SSE events', { skip: !loopbackAvailable }, async (t) => {
+  const child = spawnTracked(t, bin, ['serve', '--port', '0', '--hostname', '127.0.0.1'], {
     stdio: ['ignore', 'pipe', 'pipe'],
   })
 
@@ -264,8 +265,8 @@ test('fixture reports nonzero and port-bound faults', async () => {
   assert.match(bound.stderr, /EADDRINUSE/)
 })
 
-test('fixture malformed-json fault changes assistant text deltas', { skip: !loopbackAvailable }, async () => {
-  const child = spawnDetached(bin, ['serve', '--port', '0', '--hostname', '127.0.0.1'], {
+test('fixture malformed-json fault changes assistant text deltas', { skip: !loopbackAvailable }, async (t) => {
+  const child = spawnTracked(t, bin, ['serve', '--port', '0', '--hostname', '127.0.0.1'], {
     env: { ...process.env, FAKE_OPENCODE_FAULT: 'malformed-json' },
     stdio: ['ignore', 'pipe', 'pipe'],
   })

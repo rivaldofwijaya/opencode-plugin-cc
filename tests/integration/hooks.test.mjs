@@ -1,17 +1,16 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, writeFile, readFile, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
-import { isAlive, run, spawnDetached, terminate } from '../../scripts/lib/process.mjs'
+import { isAlive, run, terminate } from '../../scripts/lib/process.mjs'
 import { createJob, listJobs, readJob, updateJob } from '../../scripts/lib/tracked-jobs.mjs'
-import { brokerDir, jobDir, readJson, writeJson } from '../../scripts/lib/state.mjs'
-import { refsPath, readEndpoint, writeEndpoint } from '../../scripts/lib/broker-endpoint.mjs'
-import { shutdownBroker } from '../../scripts/lib/broker-lifecycle.mjs'
+import { jobDir, readJson, writeJson } from '../../scripts/lib/state.mjs'
+import { refsPath, readEndpoint } from '../../scripts/lib/broker-endpoint.mjs'
 import { prepareReview } from '../../scripts/lib/review-job.mjs'
+import { spawnTracked, withFakeOwnedBroker } from '../helpers/process-cleanup.mjs'
 
 const lifecycle = fileURLToPath(new URL('../../scripts/session-lifecycle-hook.mjs', import.meta.url))
 const gate = fileURLToPath(new URL('../../scripts/stop-review-gate-hook.mjs', import.meta.url))
@@ -77,25 +76,6 @@ function openPipeHook(script, args, env) {
   })
 }
 
-async function withFakeOwnedBroker(env, callback) {
-  const child = spawnDetached(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
-  const password = 'test-password'
-  const startedAt = Date.now()
-  await writeEndpoint({ port: 1, pid: child.pid, password, startedAt }, env)
-  await writeJson(join(brokerDir(env), 'owner.json'), {
-    pid: child.pid,
-    port: 1,
-    startedAt,
-    passwordHash: createHash('sha256').update(password).digest('hex'),
-  })
-  try {
-    return await callback(child)
-  } finally {
-    await shutdownBroker(env)
-    if (isAlive(child.pid)) await terminate(child.pid, { graceMs: 1000 })
-  }
-}
-
 test('SessionStart registers the session and exits 0 silently', async () => {
   const s = await sandbox()
   const r = await hook(lifecycle, ['SessionStart'], s.env, { session_id: 'cc-1', cwd: s.repo })
@@ -115,11 +95,11 @@ test('SessionStart never blocks even when the binary is missing', async () => {
   )
 })
 
-test('SessionEnd unregisters only its session and preserves another session holder', async () => {
+test('SessionEnd unregisters only its session and preserves another session holder', async (t) => {
   const s = await sandbox()
   await hook(lifecycle, ['SessionStart'], s.env, { session_id: 'cc-live', cwd: s.repo })
   await hook(lifecycle, ['SessionStart'], s.env, { session_id: 'cc-end', cwd: s.repo })
-  await withFakeOwnedBroker(s.env, async (broker) => {
+  await withFakeOwnedBroker(t, s.env, async (broker) => {
     const r = await hook(lifecycle, ['SessionEnd'], s.env, { session_id: 'cc-end', cwd: s.repo })
     assert.equal(r.code, 0)
     assert.deepEqual(
@@ -160,7 +140,7 @@ test('SessionEnd cancels this session running jobs', async (t) => {
   assert.ok(['cancelled', 'stale'].includes(meta.state), meta.state)
 })
 
-test('SessionEnd does not kill a live background worker', async () => {
+test('SessionEnd does not kill a live background worker', async (t) => {
   const s = await sandbox()
   const workerToken = 'live-worker-token'
   let worker
@@ -168,7 +148,7 @@ test('SessionEnd does not kill a live background worker', async () => {
     const job = await createJob({
       ccSessionId: 'cc-live', verb: 'task', cwd: s.repo, background: true,
     }, s.env)
-    worker = spawnDetached(process.execPath, [
+    worker = spawnTracked(t, process.execPath, [
       '-e', 'setInterval(() => {}, 1000)', '--', '--opencode-job-worker', job.id, workerToken,
     ])
     assert.equal(isAlive(worker.pid), true)

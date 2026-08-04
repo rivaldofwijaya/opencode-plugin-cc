@@ -86,6 +86,8 @@ export class OpencodeClient {
 
   doc() { return this.request('GET', '/doc') }
 
+  agents() { return this.request('GET', '/agent') }
+
   async health({ timeoutMs = 2000 } = {}) {
     try { await this.request('GET', '/doc', undefined, { timeoutMs }); return true } catch { return false }
   }

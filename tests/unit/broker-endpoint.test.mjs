@@ -48,6 +48,18 @@ test('clearEndpoint removes the portfile and is safe twice', async () => {
   assert.equal(await readEndpoint(env), null)
 })
 
+test('clearEndpoint does not unlink the lock held by its caller', async () => {
+  const env = await sandbox()
+  await writeEndpoint({ port: 1, pid: 2, password: 'p', startedAt: 0 }, env)
+  assert.equal(await acquireLock(env), true)
+  await clearEndpoint(env)
+  assert.equal(await readEndpoint(env), null)
+  assert.equal(await acquireLock(env), false)
+  await releaseLock(env)
+  assert.equal(await acquireLock(env), true)
+  await releaseLock(env)
+})
+
 test('clearEndpoint rethrows cleanup errors other than ENOENT', async () => {
   const env = await sandbox()
   await mkdir(endpointPath(env), { recursive: true })
@@ -71,4 +83,12 @@ test('a lock held by a dead pid is treated as stale', async () => {
   await mkdir(join(env.XDG_STATE_HOME, 'opencode-plugin-cc', 'broker'), { recursive: true })
   await writeFile(lockPath(env), JSON.stringify({ pid: 2 ** 22, at: Date.now() }))
   assert.equal(await acquireLock(env), true)
+})
+
+test('a freshly created partial lock is not treated as stale', async () => {
+  const env = await sandbox()
+  await mkdir(join(env.XDG_STATE_HOME, 'opencode-plugin-cc', 'broker'), { recursive: true })
+  await writeFile(lockPath(env), '')
+  assert.equal(await acquireLock(env), false)
+  await releaseLock(env)
 })

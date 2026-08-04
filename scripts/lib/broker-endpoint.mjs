@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { chmod, mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
+import { chmod, mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { brokerDir, readJson, writeJson } from './state.mjs'
 import { isAlive } from './process.mjs'
@@ -37,9 +37,11 @@ export async function writeEndpoint(rec, env = process.env) {
   await chmod(endpointPath(env), 0o600)
 }
 
+// Endpoint cleanup removes only the endpoint record. The caller that acquired
+// the lock owns its release and must call releaseLock exactly once; the only
+// other code allowed to remove a lock is the stale-lock reclaim path above.
 export async function clearEndpoint(env = process.env) {
   await unlinkIfMissing(endpointPath(env))
-  await unlinkIfMissing(lockPath(env))
 }
 
 async function readLock(path) {
@@ -61,7 +63,17 @@ async function readLock(path) {
 async function lockIsStale(path) {
   const lock = await readLock(path)
   if (!lock) return true
-  if (!lock.record || typeof lock.record !== 'object') return true
+  if (!lock.record || typeof lock.record !== 'object') {
+    // A contender can observe the tiny interval between O_EXCL creation and
+    // the owner's JSON write. Treat a fresh malformed/empty lock as live;
+    // only an old one is eligible for stale recovery.
+    try {
+      return Date.now() - (await stat(path)).mtimeMs > STALE_LOCK_MS
+    } catch (error) {
+      if (error.code === 'ENOENT') return true
+      throw error
+    }
+  }
   if (lock.record.pid && !isAlive(lock.record.pid)) return true
   return Date.now() - (lock.record.at || 0) > STALE_LOCK_MS
 }

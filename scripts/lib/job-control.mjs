@@ -248,6 +248,7 @@ async function writeWorkerOwner(jobId, pid, workerToken, env) {
   await atomicWrite(
     join(jobDir(jobId, env), 'worker-owner.json'),
     JSON.stringify({ jobId, pid, workerToken, startedAt: Date.now() }) + '\n',
+    { mode: 0o600 },
   )
 }
 
@@ -362,6 +363,7 @@ async function writeWorkerRequest(jobId, request, env) {
   await atomicWrite(
     join(jobDir(jobId, env), 'worker.json'),
     JSON.stringify(request, null, 2) + '\n',
+    { mode: 0o600 },
   )
 }
 

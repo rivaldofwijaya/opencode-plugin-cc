@@ -192,11 +192,13 @@ const handlers = {
     const broker = await reapOrphans(env)
     const jobs = await pruneStale(env)
     const lines = [
-      broker.cleared ? 'Cleared a stale broker portfile.' : 'The broker record was already clean.',
+      broker.protected
+        ? 'Could not prove broker process identity; stop the process with the recorded PID, then run /opencode:repair again.'
+        : (broker.cleared ? 'Cleared a stale broker portfile.' : 'The broker record was already clean.'),
       jobs.stale.length ? `Marked ${jobs.stale.length} orphaned job record(s) stale: ${jobs.stale.join(', ')}` : 'No orphaned job records.',
       jobs.removed.length ? `Removed ${jobs.removed.length} expired job record(s).` : 'No expired job records.',
     ]
-    return { stdout: lines.join('\n'), exitCode: EXIT_CODES.SUCCESS }
+    return { stdout: lines.join('\n'), exitCode: broker.protected ? EXIT_CODES.GAP : EXIT_CODES.SUCCESS }
   },
 
   'review-size': async ({ flags, cwd }) => {

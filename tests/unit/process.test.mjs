@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { run, spawnDetached, terminate, isAlive } from '../../scripts/lib/process.mjs'
+import { run, terminate, isAlive } from '../../scripts/lib/process.mjs'
+import { spawnTracked } from '../helpers/process-cleanup.mjs'
 
 test('run captures stdout and a zero exit', async () => {
   const r = await run('node', ['-e', 'console.log("hi")'])
@@ -46,16 +47,16 @@ test('run resolves when the child exits while stdin reports EPIPE', async () => 
   assert.equal(r.timedOut, false)
 })
 
-test('terminate stops a detached child and isAlive goes false', async () => {
-  const child = spawnDetached('node', ['-e', 'setInterval(()=>{}, 1000)'])
+test('terminate stops a detached child and isAlive goes false', async (t) => {
+  const child = spawnTracked(t, 'node', ['-e', 'setInterval(()=>{}, 1000)'])
   assert.equal(isAlive(child.pid), true)
   const outcome = await terminate(child.pid, { graceMs: 2000 })
   assert.ok(['exited', 'killed'].includes(outcome))
   assert.equal(isAlive(child.pid), false)
 })
 
-test('terminate escalates when a detached child ignores SIGTERM', async () => {
-  const child = spawnDetached('node', [
+test('terminate escalates when a detached child ignores SIGTERM', async (t) => {
+  const child = spawnTracked(t, 'node', [
     '-e',
     'process.on("SIGTERM", () => {}); process.stdout.write("ready\\n"); setTimeout(() => process.exit(0), 5000)',
   ], { stdio: ['ignore', 'pipe', 'ignore'] })
