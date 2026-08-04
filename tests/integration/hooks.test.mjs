@@ -327,7 +327,10 @@ test('the Stop gate is silent when only low-severity findings come back', async 
   const s = await sandbox()
   const script = join(s.home, 'low.jsonl')
   await writeFile(script, [
-    JSON.stringify({ type: 'session.next.text.delta', properties: { delta: '{"findings":[{"file":"a.js","line":1,"severity":"low","confidence":"low","body":"nit"}]}' } }),
+    JSON.stringify({ type: 'message.updated', properties: { info: { id: 'msg_fake_1', role: 'assistant' } } }),
+    JSON.stringify({ type: 'message.part.updated', properties: { part: { id: 'prt_fake_text', messageID: 'msg_fake_1', type: 'text' } } }),
+    JSON.stringify({ type: 'message.part.delta', properties: { messageID: 'msg_fake_1', partID: 'prt_fake_text', field: 'text', delta: '{"findings":[{"file":"a.js","line":1,"severity":"low","confidence":"low","body":"nit"}]}' } }),
+    JSON.stringify({ type: 'message.part.updated', properties: { part: { id: 'prt_fake_text', messageID: 'msg_fake_1', type: 'text', text: '{"findings":[{"file":"a.js","line":1,"severity":"low","confidence":"low","body":"nit"}]}' } } }),
     JSON.stringify({ type: 'session.idle', properties: {} }),
   ].join('\n') + '\n')
   await run(process.execPath, [companion, 'gate', '--on'], { env: s.env })
@@ -400,10 +403,13 @@ test('concurrent Stop gates cancel only the review job each hook created', async
   const s = await sandbox()
   const script = join(s.home, 'slow-gate.jsonl')
   await writeFile(script, [
+    JSON.stringify({ type: 'message.updated', properties: { info: { id: 'msg_fake_1', role: 'assistant' } } }),
+    JSON.stringify({ type: 'message.part.updated', properties: { part: { id: 'prt_fake_text', messageID: 'msg_fake_1', type: 'text' } } }),
     JSON.stringify({
-      type: 'session.next.text.delta',
-      properties: { delta: '{"findings":[]}' },
+      type: 'message.part.delta',
+      properties: { messageID: 'msg_fake_1', partID: 'prt_fake_text', field: 'text', delta: '{"findings":[]}' },
     }),
+    JSON.stringify({ type: 'message.part.updated', properties: { part: { id: 'prt_fake_text', messageID: 'msg_fake_1', type: 'text', text: '{"findings":[]}' } } }),
     JSON.stringify({ type: 'session.idle', properties: {} }),
   ].join('\n') + '\n')
   await run(process.execPath, [companion, 'gate', '--on'], { env: s.env })
@@ -416,7 +422,7 @@ test('concurrent Stop gates cancel only the review job each hook created', async
       ...s.env,
       CLAUDE_SESSION_ID: 'cc-concurrent',
       OPENCODE_STOP_GATE_TIMEOUT_MS: '3000',
-      FAKE_OPENCODE_EVENT_DELAY_MS: '5000',
+      FAKE_OPENCODE_EVENT_DELAY_MS: '1250',
       FAKE_OPENCODE_SCRIPT: script,
     },
     { session_id: 'cc-concurrent', cwd: s.repo },
@@ -429,7 +435,7 @@ test('concurrent Stop gates cancel only the review job each hook created', async
       ...s.env,
       CLAUDE_SESSION_ID: 'cc-concurrent',
       OPENCODE_STOP_GATE_TIMEOUT_MS: '7000',
-      FAKE_OPENCODE_EVENT_DELAY_MS: '5000',
+      FAKE_OPENCODE_EVENT_DELAY_MS: '1250',
       FAKE_OPENCODE_SCRIPT: script,
     },
     { session_id: 'cc-concurrent', cwd: s.repo },

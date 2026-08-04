@@ -19,7 +19,17 @@ import {
 import { readJson } from './state.mjs'
 
 const RECONNECT_DELAYS_MS = [250, 500, 1000, 2000, 4000]
-const STREAM_IDLE_TIMEOUT_MS = 2000
+// Providers can spend much longer than two seconds thinking; this bound is
+// for detecting a genuinely dead stream, not for interrupting a live model.
+const STREAM_IDLE_TIMEOUT_MS = 120_000
+// A positive finite integer OPENCODE_STREAM_IDLE_MS is a diagnostic/test
+// override; every other value deliberately falls back to the safe default.
+export function streamIdleTimeoutMs(env = process.env) {
+  const configured = Number(env?.OPENCODE_STREAM_IDLE_MS)
+  return Number.isFinite(configured) && Number.isInteger(configured) && configured > 0
+    ? configured
+    : STREAM_IDLE_TIMEOUT_MS
+}
 const WORKER_HANDOFF_TIMEOUT_MS = 10_000
 const WORKER_FLAG = '--opencode-job-worker'
 const WORKER_MODULE = fileURLToPath(import.meta.url)
@@ -66,17 +76,87 @@ function eventErrorName(event) {
     ?? 'UnknownError'
 }
 
-function applyCounters(counters, event) {
-  if (event.type === 'session.next.step.started') counters.steps += 1
-  if (event.type === 'session.next.tool.called') counters.tools += 1
-  if (event.type === 'message.updated') {
-    const tokens = event.properties?.info?.tokens
-    if (tokens) {
-      if (tokens.input !== undefined) counters.inputTokens = tokens.input
-      if (tokens.output !== undefined) counters.outputTokens = tokens.output
+function eventErrorMessage(event) {
+  const message = event.properties?.error?.data?.message
+  return typeof message === 'string' && message ? message : eventErrorName(event)
+}
+
+export function classifySessionError(event) {
+  const name = eventErrorName(event)
+  return {
+    state: name === 'MessageAbortedError' ? 'cancelled' : 'failed',
+    error: eventErrorMessage(event),
+  }
+}
+
+export function createEventAccumulator() {
+  const messageRoles = new Map()
+  const parts = new Map()
+  const partOrder = []
+  const seenPartIds = new Set()
+  const deltas = new Map()
+  const tokenCounters = { inputTokens: 0, outputTokens: 0 }
+
+  const rememberPart = (partID) => {
+    if (typeof partID !== 'string' || !partID) return
+    if (seenPartIds.has(partID)) return
+    seenPartIds.add(partID)
+    partOrder.push(partID)
+  }
+
+  const apply = (event) => {
+    if (event.type === 'message.updated') {
+      const info = event.properties?.info
+      if (info?.id && info.role) messageRoles.set(info.id, info.role)
+      const tokens = info?.tokens
+      if (tokens) {
+        if (tokens.input !== undefined) tokenCounters.inputTokens = tokens.input
+        if (tokens.output !== undefined) tokenCounters.outputTokens = tokens.output
+      }
+    }
+
+    if (event.type === 'message.part.delta') {
+      const properties = event.properties ?? {}
+      rememberPart(properties.partID)
+      if (typeof properties.delta === 'string' && properties.partID) {
+        deltas.set(properties.partID, (deltas.get(properties.partID) ?? '') + properties.delta)
+      }
+    }
+
+    if (event.type === 'message.part.updated') {
+      const snapshot = event.properties?.part
+      if (snapshot?.id) {
+        rememberPart(snapshot.id)
+        parts.set(snapshot.id, snapshot)
+      }
     }
   }
-  return counters
+
+  const resultText = () => partOrder.map((partID) => {
+    const snapshot = parts.get(partID)
+    if (snapshot?.type !== 'text' || messageRoles.get(snapshot.messageID) !== 'assistant') return ''
+    if (Object.hasOwn(snapshot, 'text')) return typeof snapshot.text === 'string' ? snapshot.text : ''
+    return deltas.get(partID) ?? ''
+  }).join('')
+
+  const counters = () => {
+    let steps = 0
+    let tools = 0
+    for (const snapshot of parts.values()) {
+      if (snapshot.type === 'step-finish') steps += 1
+      // The live capture contains no tool part; this counter is retained for
+      // the protocol shape and must be verified by a future live run.
+      if (snapshot.type === 'tool') tools += 1
+    }
+    return {
+      steps,
+      tools,
+      inputTokens: tokenCounters.inputTokens,
+      outputTokens: tokenCounters.outputTokens,
+    }
+  }
+
+  return { apply, resultText, counters }
 }
 
 function promptBody({ prompt, system, agent, model, variant, tools }) {
@@ -176,8 +256,8 @@ function beginExecution({ broker, jobId, sessionID, promptOptions, env, releaseB
   let terminal = null
   let persistence = Promise.resolve()
   let persistenceError = null
-  let text = ''
-  const counters = { steps: 0, tools: 0, inputTokens: 0, outputTokens: 0 }
+  const accumulator = createEventAccumulator()
+  const idleTimeoutMs = streamIdleTimeoutMs(env)
   let resolveConnected
   const connected = new Promise((resolve) => { resolveConnected = resolve })
   let connectedOnce = false
@@ -192,11 +272,11 @@ function beginExecution({ broker, jobId, sessionID, promptOptions, env, releaseB
     for (let attempt = 0; attempt <= RECONNECT_DELAYS_MS.length; attempt += 1) {
       const currentController = new AbortController()
       controller = currentController
-      let idleTimer = setTimeout(() => currentController.abort(), STREAM_IDLE_TIMEOUT_MS)
+      let idleTimer = setTimeout(() => currentController.abort(), idleTimeoutMs)
       let streamFailed = false
       const refreshIdleTimer = () => {
         clearTimeout(idleTimer)
-        idleTimer = setTimeout(() => currentController.abort(), STREAM_IDLE_TIMEOUT_MS)
+        idleTimer = setTimeout(() => currentController.abort(), idleTimeoutMs)
       }
 
       try {
@@ -212,10 +292,7 @@ function beginExecution({ broker, jobId, sessionID, promptOptions, env, releaseB
 
             persistence = persistence.then(async () => {
               await appendEvent(jobId, event, env)
-              applyCounters(counters, event)
-              if (event.type === 'session.next.text.delta' && event.properties?.delta) {
-                text += event.properties.delta
-              }
+              accumulator.apply(event)
             }).catch((error) => {
               persistenceError = error
               settle({ state: 'failed', error: errorText(error) })
@@ -223,11 +300,7 @@ function beginExecution({ broker, jobId, sessionID, promptOptions, env, releaseB
 
             if (event.type === 'session.idle') settle({ state: 'done', error: null })
             if (event.type === 'session.error') {
-              const name = eventErrorName(event)
-              settle({
-                state: name === 'MessageAbortedError' ? 'cancelled' : 'failed',
-                error: name,
-              })
+              settle(classifySessionError(event))
             }
           },
         })
@@ -258,13 +331,13 @@ function beginExecution({ broker, jobId, sessionID, promptOptions, env, releaseB
       await persistence
       const latest = await readJob(jobId, env)
       const state = latest?.state === 'cancelled' ? 'cancelled' : terminal.state
-      await writeResult(jobId, text, env)
+      await writeResult(jobId, accumulator.resultText(), env)
       await releaseBrokerRef?.()
       return updateJob(jobId, {
         state,
         endedAt: Date.now(),
         error: state === 'done' ? null : (latest?.state === 'cancelled' ? latest.error : terminal.error),
-        counters,
+        counters: accumulator.counters(),
       }, env)
     } catch (error) {
       await releaseBrokerRef?.()

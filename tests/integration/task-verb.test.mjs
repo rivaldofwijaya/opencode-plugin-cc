@@ -497,7 +497,7 @@ test('a cancelled background task leaves no worker or broker reference', async (
 })
 
 test('a timed-out background task leaves no worker or broker reference', async (t) => {
-  const s = await sandbox()
+  const s = await sandbox({ OPENCODE_STREAM_IDLE_MS: '250' })
   const script = join(s.home, 'timeout-script.jsonl')
   await writeFile(script, '')
   const r = await cli({ ...s.env, FAKE_OPENCODE_SCRIPT: script }, s.home, [

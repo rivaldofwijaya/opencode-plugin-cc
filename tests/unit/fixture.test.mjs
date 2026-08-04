@@ -214,13 +214,40 @@ test('fixture serve answers /doc and replays typed SSE events', { skip: !loopbac
       (event) => event.payload.type === 'session.idle',
     )
     const payloads = events.map((event) => event.payload)
-    const step = payloads.find((event) => event.type === 'session.next.step.started')
-    const delta = payloads.find((event) => event.type === 'session.next.text.delta')
-    assert.equal(step.properties.assistantMessageID, 'msg_fake_1')
-    assert.equal(delta.properties.assistantMessageID, 'msg_fake_1')
-    assert.ok(payloads.some((event) => event.type === 'session.next.tool.called'))
-    assert.ok(payloads.some((event) => event.type === 'message.updated'))
-    assert.ok(payloads.some((event) => event.type === 'session.idle'))
+    const types = payloads.map((event) => event.type)
+    const userMessage = payloads.find(
+      (event) => event.type === 'message.updated' && event.properties.info.role === 'user',
+    )
+    const userPart = payloads.find(
+      (event) => event.type === 'message.part.updated' && event.properties.part.messageID === 'msg_fake_user',
+    )
+    const assistantMessage = payloads.find(
+      (event) => event.type === 'message.updated' && event.properties.info.role === 'assistant',
+    )
+    const reasoningDelta = payloads.find(
+      (event) => event.type === 'message.part.delta' && event.properties.partID === 'prt_fake_reasoning',
+    )
+    const reasoningPart = payloads.find(
+      (event) => event.type === 'message.part.updated' && event.properties.part.type === 'reasoning',
+    )
+    const textParts = payloads.filter(
+      (event) => event.type === 'message.part.updated' && event.properties.part.id === 'prt_fake_text',
+    )
+    const step = payloads.find(
+      (event) => event.type === 'message.part.updated' && event.properties.part.type === 'step-finish',
+    )
+    const finalMessage = payloads.at(-2)
+    assert.equal(userMessage.properties.info.id, 'msg_fake_user')
+    assert.equal(userPart.properties.part.type, 'text')
+    assert.equal(assistantMessage.properties.info.id, 'msg_fake_1')
+    assert.equal(reasoningDelta.properties.field, 'text')
+    assert.equal(reasoningDelta.properties.partID, 'prt_fake_reasoning')
+    assert.ok(payloads.indexOf(reasoningDelta) < payloads.indexOf(reasoningPart))
+    assert.equal(reasoningPart.properties.part.type, 'reasoning')
+    assert.deepEqual(textParts.map((event) => event.properties.part.text), ['', '{"findings":[{"file":"src/a.js","line":10,"severity":"high","confidence":"high","body":"Null deref."}]}'])
+    assert.equal(step.properties.part.tokens.output, 8)
+    assert.equal(finalMessage.type, 'message.updated')
+    assert.equal(payloads.at(-1).type, 'session.idle')
   } finally {
     await terminate(child.pid)
     assert.equal(isAlive(child.pid), false)
@@ -252,7 +279,7 @@ test('fixture malformed-json fault changes assistant text deltas', { skip: !loop
     const events = await collectEvents(eventResponse, (event) => event.payload.type === 'session.idle')
     const deltas = events
       .map((event) => event.payload)
-      .filter((event) => event.type === 'session.next.text.delta')
+      .filter((event) => event.type === 'message.part.delta')
       .map((event) => event.properties.delta)
     assert.ok(deltas.includes('not json at all'))
   } finally {
