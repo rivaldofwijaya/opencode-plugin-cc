@@ -1,0 +1,782 @@
+import { createHash, randomBytes } from 'node:crypto'
+import { chmod, readdir, unlink } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
+import { spawnDetached, terminate, isAlive, run, TERMINATE_GRACE_MS } from './process.mjs'
+import { OpencodeClient } from './server.mjs'
+import { readJson, writeJson, sessionsDir } from './state.mjs'
+import {
+  readEndpoint,
+  writeEndpoint,
+  clearEndpoint,
+  baseUrlFor,
+  acquireLock,
+  releaseLock,
+  refsPath,
+} from './broker-endpoint.mjs'
+import { brokerDir } from './state.mjs'
+
+// The client always sends OPENCODE_SERVER_PASSWORD. Verification against a
+// real binary is intentionally not performed here: this task must never spawn
+// a developer's real opencode process. Loopback binding remains the boundary
+// for versions where the password is advisory.
+
+const brokerScript = fileURLToPath(new URL('../server-broker.mjs', import.meta.url))
+const ownerPath = (env) => join(brokerDir(env), 'owner.json')
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+const LOCK_WAIT_MS = 20_000
+const BROKER_PROCESS_LOOKUP_TIMEOUT_MS = 1_000
+// ps lstart is resolved to whole seconds. startedAt is captured immediately
+// after spawn, before broker startup/health work, so two seconds covers the
+// resolution plus normal scheduling without accepting a recycled PID from a
+// different broker instance.
+const BROKER_START_TIME_TOLERANCE_MS = 2_000
+const MIN_PLAUSIBLE_PID = 2
+const MAX_PLAUSIBLE_PID = 4_194_304
+const BROKER_IDENTITY_FAILURE_DETAIL = 'broker process identity could not be proven; records remain for repair. Stop the process with the recorded PID, then run /opencode:repair again.'
+
+function clientFor(rec) {
+  return new OpencodeClient(baseUrlFor(rec), { password: rec.password })
+}
+
+function passwordHash(password) {
+  return createHash('sha256').update(String(password || '')).digest('hex')
+}
+
+function ownerRecordFor(rec) {
+  return {
+    pid: rec.pid,
+    port: rec.port,
+    startedAt: rec.startedAt,
+    passwordHash: passwordHash(rec.password),
+  }
+}
+
+async function writeOwner(rec, env) {
+  await writeJson(ownerPath(env), ownerRecordFor(rec))
+  await chmod(ownerPath(env), 0o600)
+}
+
+function parseProcessStart(value) {
+  const text = String(value ?? '').trim()
+  if (!text) return null
+  if (/^\d+$/.test(text)) {
+    const numeric = Number(text)
+    if (!Number.isSafeInteger(numeric)) return null
+    if (numeric >= 1_000_000_000_000) return numeric
+    if (numeric >= 1_000_000_000) return numeric * 1_000
+    return null
+  }
+  const match = text.match(/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})$/)
+  if (!match) return null
+  const months = {
+    Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
+    Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11,
+  }
+  const [, monthName, dayText, hourText, minuteText, secondText, yearText] = match
+  const year = Number(yearText)
+  const month = months[monthName]
+  const day = Number(dayText)
+  const hour = Number(hourText)
+  const minute = Number(minuteText)
+  const second = Number(secondText)
+  const parsed = Date.UTC(year, month, day, hour, minute, second)
+  const date = new Date(parsed)
+  return date.getUTCFullYear() === year
+    && date.getUTCMonth() === month
+    && date.getUTCDate() === day
+    && date.getUTCHours() === hour
+    && date.getUTCMinutes() === minute
+    && date.getUTCSeconds() === second
+    ? parsed
+    : null
+}
+
+async function processIdentity(pid, env) {
+  let result
+  try {
+    result = await run('ps', ['-p', String(pid), '-o', 'lstart=', '-o', 'command='], {
+      // BSD ps emits lstart in the process locale and without an offset. Keep
+      // both the output and its interpretation deterministic, regardless of
+      // the caller's locale or timezone.
+      env: { ...env, LC_ALL: 'C', LANG: 'C', TZ: 'UTC' },
+      timeoutMs: BROKER_PROCESS_LOOKUP_TIMEOUT_MS,
+    })
+  } catch {
+    return null
+  }
+  if (result.code !== 0 || result.timedOut) return null
+  const output = result.stdout.trim()
+  const numeric = output.match(/^(\d{10,13})\s+([\s\S]+)$/)
+  if (numeric) {
+    return { processStartText: numeric[1], command: numeric[2].trim() }
+  }
+  const lstart = output.match(/^((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+([\s\S]+)$/)
+  if (!lstart) return null
+  return { processStartText: lstart[1], command: lstart[2].trim() }
+}
+
+async function ownsEndpointProcess(rec, env) {
+  if (!rec?.pid || !rec?.password) return false
+  const owner = await readJson(ownerPath(env), null)
+  if (!(owner?.pid === rec.pid
+    && owner.port === rec.port
+    && owner.startedAt === rec.startedAt
+    && owner.passwordHash === passwordHash(rec.password))) {
+    return false
+  }
+  // The endpoint and owner records are both our files, so they are not
+  // process identity evidence. Ask the OS about the live PID instead. This
+  // command-line witness is true for the child we launch as `opencode serve`
+  // and false for a recycled PID held by an unrelated process. Fail closed if
+  // ps is missing, times out, or exits unsuccessfully.
+  const identity = await processIdentity(rec.pid, env)
+  const processStart = parseProcessStart(identity?.processStartText)
+  if (!identity?.command || !processStart || !Number.isFinite(rec.startedAt)) return false
+  if (Math.abs(processStart - rec.startedAt) > BROKER_START_TIME_TOLERANCE_MS) return false
+  return /(?:^|\s)serve(?:\s|$)/.test(identity.command)
+    && /(?:^|\s)--port(?:=|\s+)0(?:\s|$)/.test(identity.command)
+    && /(?:^|\s)--hostname(?:=|\s+)127\.0\.0\.1(?:\s|$)/.test(identity.command)
+}
+
+async function terminateOwnedBroker(rec, env) {
+  if (!rec?.pid || !isAlive(rec.pid)) return { outcome: 'gone', protected: false }
+  if (!await ownsEndpointProcess(rec, env)) return { outcome: 'unverified', protected: true }
+  const terminated = await terminate(rec.pid, { graceMs: TERMINATE_GRACE_MS })
+  return { outcome: terminated === 'gone' ? 'gone' : 'stopped', protected: false }
+}
+
+function preserveBrokerRecords(error) {
+  const wrapped = new Error(`${error.message}\n${BROKER_IDENTITY_FAILURE_DETAIL}`, { cause: error })
+  wrapped.preserveBrokerRecords = true
+  return wrapped
+}
+
+async function clearOwner(rec, env) {
+  const owner = await readJson(ownerPath(env), null)
+  const recordMatches = rec && owner?.pid === rec.pid
+    && owner.port === rec.port
+    && owner.startedAt === rec.startedAt
+    && owner.passwordHash === passwordHash(rec.password)
+  const safeToClear = !rec || (recordMatches && (
+    !isAlive(rec.pid) || await ownsEndpointProcess(rec, env)
+  ))
+  if (safeToClear) {
+    try {
+      await unlink(ownerPath(env))
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+  }
+}
+
+async function liveEndpoint(env) {
+  const rec = await readEndpoint(env)
+  if (!rec || !Number.isInteger(rec.pid) || !Number.isInteger(rec.port)) return null
+  if (!isAlive(rec.pid)) return null
+  return (await clientFor(rec).health({ timeoutMs: 2000 })) ? rec : null
+}
+
+async function cleanupOrphanLocked(env) {
+  const rec = await readEndpoint(env)
+  if (!rec) return false
+  if (await liveEndpoint(env)) return false
+
+  // A hand-written or foreign portfile is never allowed to turn reaping into
+  // a kill of an unrelated process. Both our private record and the live
+  // process command line must agree; otherwise leave the record for repair.
+  if (rec.pid && isAlive(rec.pid)) {
+    const termination = await terminateOwnedBroker(rec, env)
+    if (termination.protected) {
+      return { cleared: false, protected: true }
+    }
+  }
+  await clearEndpoint(env)
+  await clearOwner(rec, env)
+  return true
+}
+
+export async function reapOrphans(env = process.env) {
+  // Acquiring the lock before inspecting and clearing is the spawn-once
+  // guarantee: a live startup lock is never unlinked by stale cleanup.
+  if (!await acquireLock(env)) return { cleared: false }
+  try {
+    const endpointCleared = await cleanupOrphanLocked(env)
+    const refsCleared = await repairRefsLocked(env)
+    const cleared = (endpointCleared?.cleared ?? endpointCleared) || refsCleared.cleared
+    const protectedRecord = endpointCleared?.protected || refsCleared.protected
+    return protectedRecord
+      ? { cleared, protected: true, detail: 'broker process identity could not be proven; records remain for repair' }
+      : { cleared }
+  } finally {
+    await releaseLock(env)
+  }
+}
+
+function redact(text, secret) {
+  return secret ? String(text).split(String(secret)).join('[REDACTED]') : String(text)
+}
+
+async function spawnBroker(env, timeoutMs) {
+  const password = randomBytes(24).toString('hex')
+  const child = spawnDetached(process.execPath, [brokerScript], {
+    env: { ...env, OPENCODE_SERVER_PASSWORD: password },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const startedAt = Date.now()
+
+  return await new Promise((resolve, reject) => {
+    let stdout = ''
+    let stderr = ''
+    let reported
+    let settled = false
+    let timer
+
+    const cleanup = () => {
+      clearTimeout(timer)
+      child.stdout?.removeAllListeners('data')
+      child.stderr?.removeAllListeners('data')
+      child.removeAllListeners('error')
+      child.removeAllListeners('close')
+      child.removeAllListeners('exit')
+    }
+
+    const fail = async (error) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      if (isAlive(child.pid)) await terminate(child.pid, { graceMs: TERMINATE_GRACE_MS })
+      reject(error)
+    }
+
+    const finish = async (code, signal) => {
+      if (settled) return
+      if (!reported) {
+        await fail(new Error(
+          `opencode server would not start.\n${redact(stderr.trim() || stdout.trim(), password)}`,
+        ))
+        return
+      }
+      settled = true
+      cleanup()
+      if (code !== 0) {
+        const candidate = { ...reported, password, startedAt: reported.startedAt ?? startedAt }
+        await writeOwner(candidate, env)
+        await writeEndpoint(candidate, env)
+        const termination = await terminateOwnedBroker(candidate, env)
+        const failure = new Error(
+          `opencode broker exited with ${code ?? `signal ${signal}`}.\n${redact(stderr.trim(), password)}`,
+        )
+        reject(termination.protected ? preserveBrokerRecords(failure) : failure)
+        return
+      }
+      resolve({ ...reported, password, startedAt: reported.startedAt ?? startedAt })
+    }
+
+    timer = setTimeout(() => {
+      void fail(new Error('timed out waiting for opencode serve to report a port'))
+    }, Math.max(1, timeoutMs))
+
+    child.stdout.on('data', (data) => {
+      stdout += data.toString()
+      for (const line of stdout.split('\n')) {
+        try {
+          const value = JSON.parse(line)
+          if (Number.isInteger(value.port) && Number.isInteger(value.pid)) {
+            reported = {
+              port: value.port,
+              pid: value.pid,
+              ...(Number.isFinite(value.startedAt) ? { startedAt: value.startedAt } : {}),
+            }
+            break
+          }
+        } catch {
+          // The broker may receive non-JSON diagnostic output; keep scanning.
+        }
+      }
+    })
+    child.stderr.on('data', (data) => {
+      stderr += data.toString()
+      if (stderr.length > 8192) stderr = stderr.slice(-8192)
+    })
+    child.once('error', (error) => { void fail(new Error(`opencode broker process error: ${error.message}`)) })
+    child.once('close', (code, signal) => { void finish(code, signal) })
+    child.once('exit', (code, signal) => {
+      if (code !== 0 && !reported) void finish(code, signal)
+    })
+  })
+}
+
+async function ensureBrokerLocked(env, timeoutMs) {
+  const existing = await liveEndpoint(env)
+  if (existing) {
+    return {
+      baseUrl: baseUrlFor(existing),
+      password: existing.password,
+      pid: existing.pid,
+      client: clientFor(existing),
+    }
+  }
+
+  const orphan = await cleanupOrphanLocked(env)
+  if (orphan?.protected) {
+    throw new Error('broker process identity could not be proven; records remain for repair')
+  }
+  let rec
+  try {
+    rec = await spawnBroker(env, Math.max(1, Math.min(25_000, timeoutMs)))
+    rec.startedAt ??= Date.now()
+    await writeOwner(rec, env)
+    await writeEndpoint(rec, env)
+
+    const client = clientFor(rec)
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const healthTimeout = Math.max(1, Math.min(1500, deadline - Date.now()))
+      if (await client.health({ timeoutMs: healthTimeout })) {
+        return { baseUrl: baseUrlFor(rec), password: rec.password, pid: rec.pid, client }
+      }
+      await sleep(200)
+    }
+    throw new Error(`opencode server started on port ${rec.port} but never answered GET /doc`)
+  } catch (error) {
+    // This order is deliberate: the detached server must be terminated before
+    // its endpoint/ownership state is removed, or startup failures leak a
+    // server that later callers cannot safely identify.
+    let failure = error
+    let preserveRecords = Boolean(error?.preserveBrokerRecords)
+    if (!preserveRecords && rec?.pid && isAlive(rec.pid)) {
+      const termination = await terminateOwnedBroker(rec, env)
+      if (termination.protected) {
+        failure = preserveBrokerRecords(error)
+        preserveRecords = true
+      }
+    }
+    if (!preserveRecords) {
+      await clearEndpoint(env)
+      await clearOwner(rec, env)
+    }
+    throw failure
+  }
+}
+
+async function withLock(env, callback, { timeoutMs = LOCK_WAIT_MS } = {}) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await acquireLock(env)) {
+      try {
+        return await callback()
+      } finally {
+        await releaseLock(env)
+      }
+    }
+    await sleep(10)
+  }
+  throw new Error('timed out waiting for the opencode broker lock')
+}
+
+export async function ensureBroker({ env = process.env, timeoutMs = 20_000 } = {}) {
+  const existing = await liveEndpoint(env)
+  if (existing) {
+    return {
+      baseUrl: baseUrlFor(existing),
+      password: existing.password,
+      pid: existing.pid,
+      client: clientFor(existing),
+    }
+  }
+
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await acquireLock(env)) {
+      try {
+        return await ensureBrokerLocked(env, timeoutMs)
+      } finally {
+        await releaseLock(env)
+      }
+    }
+
+    const concurrent = await liveEndpoint(env)
+    if (concurrent) {
+      return {
+        baseUrl: baseUrlFor(concurrent),
+        password: concurrent.password,
+        pid: concurrent.pid,
+        client: clientFor(concurrent),
+      }
+    }
+    await sleep(200)
+  }
+  throw new Error('timed out waiting for another process to start the opencode server')
+}
+
+async function writeRefs(refs, env) {
+  await writeJson(refsPath(env), refs)
+  await chmod(refsPath(env), 0o600)
+}
+
+const localHolderTokens = new Map()
+const SESSION_OWNER_LOOKUP_TIMEOUT_MS = 100
+export const SESSION_HOLDER_MAX_AGE_MS = 6 * 60 * 60 * 1000
+
+function localHolderKey(env, ccSessionId) {
+  return `${refsPath(env)}\u0000${ccSessionId}`
+}
+
+function rememberLocalHolder(env, ccSessionId, holderToken) {
+  const key = localHolderKey(env, ccSessionId)
+  const tokens = localHolderTokens.get(key) ?? []
+  tokens.push(holderToken)
+  localHolderTokens.set(key, tokens)
+}
+
+function forgetLocalHolder(env, ccSessionId, holderToken) {
+  const key = localHolderKey(env, ccSessionId)
+  const tokens = localHolderTokens.get(key)
+  if (!tokens) return
+  const remaining = tokens.filter((token) => token !== holderToken)
+  if (remaining.length) localHolderTokens.set(key, remaining)
+  else localHolderTokens.delete(key)
+}
+
+function plausiblePid(value) {
+  const text = typeof value === 'number' ? String(value) : String(value ?? '').trim()
+  if (!/^\d+$/.test(text)) return null
+  const pid = Number(text)
+  return Number.isSafeInteger(pid) && pid >= MIN_PLAUSIBLE_PID && pid <= MAX_PLAUSIBLE_PID
+    ? pid
+    : null
+}
+
+function isClaudeProcess(command) {
+  const executable = String(command ?? '').trim().split(/\s+/, 1)[0]
+  return /(?:^|[\\/])claude(?:[-_]code)?(?:$|[-_])/i.test(executable)
+}
+
+async function processRecord(pid, env) {
+  let result
+  try {
+    result = await run('ps', ['-p', String(pid), '-o', 'pid=,ppid=,command='], {
+      env,
+      timeoutMs: SESSION_OWNER_LOOKUP_TIMEOUT_MS,
+    })
+  } catch {
+    return null
+  }
+  if (result.code !== 0 || result.timedOut) return null
+  const match = result.stdout.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/)
+  if (!match) return null
+  const recordPid = plausiblePid(match[1])
+  const parentPid = Number(match[2])
+  if (!recordPid || !Number.isSafeInteger(parentPid) || parentPid < 1) return null
+  return { pid: recordPid, parentPid, command: match[3].trim() }
+}
+
+async function sessionOwnerEvidence(env) {
+  const configured = plausiblePid(env.CLAUDE_CODE_SESSION_PID)
+  if (configured) {
+    const record = await processRecord(configured, env)
+    if (record?.pid === configured && isClaudeProcess(record.command)) {
+      return { pid: record.pid, command: record.command }
+    }
+  }
+
+  let current = plausiblePid(process.ppid)
+  const seen = new Set()
+  for (let depth = 0; depth < 12 && current; depth += 1) {
+    if (seen.has(current)) break
+    seen.add(current)
+    const record = await processRecord(current, env)
+    if (!record) break
+    if (isClaudeProcess(record.command)) {
+      return { pid: record.pid, command: record.command }
+    }
+    if (record.parentPid <= 1 || record.parentPid === record.pid) break
+    current = plausiblePid(record.parentPid)
+  }
+  return null
+}
+
+function legacyHolderToken(ccSessionId, at) {
+  return `legacy:${encodeURIComponent(ccSessionId)}:${at}`
+}
+
+function normalizeRefs(raw) {
+  const refs = {}
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return refs
+
+  for (const [ccSessionId, value] of Object.entries(raw)) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      refs[ccSessionId] = {
+        [legacyHolderToken(ccSessionId, value)]: { pid: null, at: value },
+      }
+      continue
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+
+    const holders = {}
+    for (const [holderToken, holder] of Object.entries(value)) {
+      if (!holder || typeof holder !== 'object' || Array.isArray(holder)) continue
+      if (!Number.isFinite(holder.at)) continue
+      const normalized = {
+        pid: plausiblePid(holder.pid),
+        at: holder.at,
+      }
+      if (holder.scope === 'session') {
+        normalized.scope = 'session'
+        normalized.sessionPid = plausiblePid(holder.sessionPid)
+        if (typeof holder.sessionCommand === 'string' && holder.sessionCommand.trim()) {
+          normalized.sessionCommand = holder.sessionCommand.trim()
+        }
+        normalized.expiresAt = Number.isFinite(holder.expiresAt)
+          ? holder.expiresAt
+          : holder.at + SESSION_HOLDER_MAX_AGE_MS
+      }
+      holders[holderToken] = normalized
+    }
+    if (Object.keys(holders).length) refs[ccSessionId] = holders
+  }
+  return refs
+}
+
+async function sessionHolderIsLive(holder, env, now) {
+  if (!Number.isFinite(holder.expiresAt) || holder.expiresAt <= now) return false
+  if (!holder.sessionPid) return true
+  if (!isAlive(holder.sessionPid)) return false
+  const record = await processRecord(holder.sessionPid, env)
+  return record?.pid === holder.sessionPid
+    && isClaudeProcess(record.command)
+    && (!holder.sessionCommand || holder.sessionCommand === record.command)
+}
+
+async function pruneDeadHolders(refs, env, { reclaimUnverified = false } = {}) {
+  const now = Date.now()
+  for (const [ccSessionId, holders] of Object.entries(refs)) {
+    for (const [holderToken, holder] of Object.entries(holders)) {
+      if (holder.scope === 'session') {
+        if (!await sessionHolderIsLive(holder, env, now)) delete holders[holderToken]
+      } else if (holder.pid && !isAlive(holder.pid)) {
+        delete holders[holderToken]
+      } else if (reclaimUnverified
+        && !holder.pid
+        && holder.at + SESSION_HOLDER_MAX_AGE_MS <= now) {
+        // Migrated pid:null records have no owner witness. Repair gives them
+        // the same absolute reclamation guarantee as an unverified session
+        // holder without pruning a recent legacy holder during normal release.
+        delete holders[holderToken]
+      }
+    }
+    if (!Object.keys(holders).length) delete refs[ccSessionId]
+  }
+  return refs
+}
+
+function pruneUnknownSessions(refs, known) {
+  for (const [ccSessionId, holders] of Object.entries(refs)) {
+    if (known.has(ccSessionId)) continue
+
+    // A session holder is live only while its session remains registered;
+    // unregistering is the durable SessionEnd proof and removes that holder.
+    // A live process can own a non-session holder (for example doctor's probe
+    // reference), so registry absence alone is not stale evidence for those.
+    // Filter per holder so a live non-session holder cannot shelter a dead or
+    // legacy sibling.
+    for (const [holderToken, holder] of Object.entries(holders)) {
+      if (holder.scope === 'session') delete holders[holderToken]
+      else if (!Number.isInteger(holder.pid) || !isAlive(holder.pid)) delete holders[holderToken]
+    }
+    if (!Object.keys(holders).length) delete refs[ccSessionId]
+  }
+  return refs
+}
+
+function holderCount(refs) {
+  return Object.values(refs).reduce((count, holders) => count + Object.keys(holders).length, 0)
+}
+
+function chooseLegacyReleaseToken(ccSessionId, env, holders) {
+  // The two-argument form is compatibility-only. It may release a holder
+  // only when local ownership, this process's PID, or the synthetic legacy
+  // pid:null marker proves that it is safe to do so.
+  const key = localHolderKey(env, ccSessionId)
+  const local = localHolderTokens.get(key) ?? []
+  for (let index = local.length - 1; index >= 0; index -= 1) {
+    const token = local[index]
+    if (holders[token]) return token
+  }
+
+  const owned = Object.entries(holders)
+    .filter(([, holder]) => holder.pid === process.pid)
+    .sort(([, a], [, b]) => a.at - b.at)
+  if (owned[0]?.[0]) return owned[0][0]
+
+  return Object.entries(holders)
+    .filter(([, holder]) => holder.pid === null)
+    .sort(([, a], [, b]) => a.at - b.at)[0]?.[0]
+}
+
+function addKnownValue(set, value) {
+  if (typeof value === 'string' && value) set.add(value)
+}
+
+function addKnownData(set, data) {
+  if (Array.isArray(data)) {
+    for (const value of data) addKnownValue(set, value)
+    return
+  }
+  if (!data || typeof data !== 'object') return
+  for (const key of ['id', 'sessionID', 'ccSessionId', 'ccSessionID']) addKnownValue(set, data[key])
+  for (const key of ['ids', 'sessionIDs', 'sessionIds', 'sessions', 'knownSessions']) {
+    if (Array.isArray(data[key])) for (const value of data[key]) addKnownValue(set, typeof value === 'string' ? value : value?.id)
+  }
+}
+
+async function knownSessions(env) {
+  const known = new Set()
+  let entries
+  try {
+    entries = await readdir(sessionsDir(env), { withFileTypes: true })
+  } catch (error) {
+    if (error.code === 'ENOENT') return known
+    throw error
+  }
+
+  for (const entry of entries) {
+    if (entry.name.startsWith('.')) continue
+    const isRegistry = ['registry.json', 'known.json', 'sessions.json'].includes(entry.name)
+    const id = entry.name.endsWith('.json') ? entry.name.slice(0, -5) : entry.name
+    if (!isRegistry && id) addKnownValue(known, id)
+    if (!entry.isFile()) continue
+    const data = await readJson(join(sessionsDir(env), entry.name), null)
+    if (isRegistry) addKnownData(known, data)
+    else if (data) addKnownData(known, data)
+  }
+  return known
+}
+
+async function repairRefsLocked(env) {
+  const before = normalizeRefs(await readJson(refsPath(env), {}))
+  const beforeCount = holderCount(before)
+  const next = await pruneDeadHolders(before, env, { reclaimUnverified: true })
+  const afterCount = holderCount(next)
+  await writeRefs(next, env)
+
+  let brokerCleared = false
+  let protectedRecord = false
+  if (afterCount === 0) {
+    const hadEndpoint = Boolean(await readEndpoint(env))
+    const outcome = await shutdownBrokerLocked(env)
+    brokerCleared = hadEndpoint && outcome !== 'unverified'
+    protectedRecord = outcome === 'unverified'
+  }
+  return {
+    cleared: beforeCount !== afterCount || brokerCleared,
+    protected: protectedRecord,
+  }
+}
+
+// Counts returned by addRef/releaseRef are live holder records, not sessions.
+// A single Claude Code session can therefore contribute several references.
+export async function addRef(ccSessionId, env = process.env, holderToken, options = {}) {
+  return await withLock(env, async () => {
+    const next = await pruneDeadHolders(normalizeRefs(await readJson(refsPath(env), {})), env)
+    const token = typeof holderToken === 'string' && holderToken
+      ? holderToken
+      : randomBytes(24).toString('hex')
+    const holders = next[ccSessionId] ?? {}
+    if (holders[token]) throw new Error(`broker holder token is already in use: ${token}`)
+    const holder = { pid: process.pid, at: Date.now() }
+    if (options.scope === 'session') {
+      holder.scope = 'session'
+      holder.sessionPid = plausiblePid(options.sessionPid)
+      if (typeof options.sessionCommand === 'string' && options.sessionCommand.trim()) {
+        holder.sessionCommand = options.sessionCommand.trim()
+      }
+      holder.expiresAt = Number.isFinite(options.expiresAt)
+        ? options.expiresAt
+        : holder.at + SESSION_HOLDER_MAX_AGE_MS
+    }
+    holders[token] = holder
+    next[ccSessionId] = holders
+    await writeRefs(next, env)
+    rememberLocalHolder(env, ccSessionId, token)
+    return holderCount(next)
+  })
+}
+
+export async function addSessionRef(ccSessionId, env = process.env, holderToken) {
+  // Only a verified Claude process is used as the session liveness witness.
+  // An absent, malformed, out-of-range, wrapper, or non-Claude PID is ignored;
+  // the holder then relies on its absolute expiry instead of trusting a raw
+  // PID that could be reused by an unrelated process.
+  const evidence = await sessionOwnerEvidence(env)
+  return addRef(ccSessionId, env, holderToken, {
+    scope: 'session',
+    sessionPid: evidence?.pid,
+    sessionCommand: evidence?.command,
+  })
+}
+
+async function shutdownBrokerLocked(env) {
+  const rec = await readEndpoint(env)
+  if (!rec) {
+    await clearEndpoint(env)
+    await clearOwner(null, env)
+    return 'gone'
+  }
+
+  let outcome = 'gone'
+  if (rec.pid && isAlive(rec.pid)) {
+    const termination = await terminateOwnedBroker(rec, env)
+    if (termination.protected) return 'unverified'
+    outcome = termination.outcome
+  }
+  await clearEndpoint(env)
+  await clearOwner(rec, env)
+  return outcome
+}
+
+export async function releaseRef(ccSessionId, env = process.env, holderToken) {
+  return await withLock(env, async () => {
+    const next = await pruneDeadHolders(normalizeRefs(await readJson(refsPath(env), {})), env)
+    const tokenless = !(typeof holderToken === 'string' && holderToken)
+    let released = false
+    const holders = next[ccSessionId]
+    if (holders) {
+      const token = tokenless
+        ? chooseLegacyReleaseToken(ccSessionId, env, holders)
+        : holderToken
+      if (token && holders[token]) {
+        delete holders[token]
+        forgetLocalHolder(env, ccSessionId, token)
+        released = true
+      }
+      if (!Object.keys(holders).length) delete next[ccSessionId]
+    }
+
+    const known = await knownSessions(env)
+    pruneUnknownSessions(next, known)
+    await writeRefs(next, env)
+
+    const remaining = holderCount(next)
+    let shutdown = false
+    let shutdownDetail
+    if (remaining === 0) {
+      const outcome = await shutdownBrokerLocked(env)
+      shutdown = outcome !== 'unverified'
+      if (!shutdown) shutdownDetail = 'broker process identity could not be proven; records remain for repair'
+    }
+    if (!released) {
+      const result = { remaining, shutdown, released: false }
+      return shutdownDetail ? { ...result, detail: shutdownDetail } : result
+    }
+    const result = tokenless
+      ? { remaining, shutdown, released }
+      : { remaining, shutdown }
+    return shutdownDetail ? { ...result, detail: shutdownDetail } : result
+  })
+}
+
+export async function shutdownBroker(env = process.env) {
+  return await withLock(env, () => shutdownBrokerLocked(env))
+}

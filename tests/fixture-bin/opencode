@@ -1,0 +1,3 @@
+#!/bin/sh
+# Intentional test-only exemption from the ESM .mjs source constraint.
+exec node "$(dirname "$0")/../fake-opencode-fixture.mjs" "$@"
