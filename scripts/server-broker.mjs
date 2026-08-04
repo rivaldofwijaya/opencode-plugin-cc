@@ -2,7 +2,7 @@
 // Spawns `opencode serve` and prints one JSON line: {"port":N,"pid":N}.
 // Used by broker-lifecycle.ensureBroker. Not a user-facing entrypoint.
 import { resolveBinary, buildServeArgs } from './lib/opencode.mjs'
-import { isAlive, spawnDetached, terminate } from './lib/process.mjs'
+import { isAlive, spawnDetached, terminate, TERMINATE_GRACE_MS } from './lib/process.mjs'
 import { writeFile } from 'node:fs/promises'
 
 const password = process.env.OPENCODE_SERVER_PASSWORD || ''
@@ -18,7 +18,7 @@ async function fail(message) {
   settled = true
   clearTimeout(timer)
   if (child?.pid && isAlive(child.pid)) {
-    await terminate(child.pid, { graceMs: 3000 })
+    await terminate(child.pid, { graceMs: TERMINATE_GRACE_MS })
   }
   process.stderr.write(redact(message))
   process.exitCode = 1

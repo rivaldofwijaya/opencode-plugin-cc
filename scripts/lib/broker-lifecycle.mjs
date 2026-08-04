@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { chmod, readdir, unlink } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
-import { spawnDetached, terminate, isAlive, run } from './process.mjs'
+import { spawnDetached, terminate, isAlive, run, TERMINATE_GRACE_MS } from './process.mjs'
 import { OpencodeClient } from './server.mjs'
 import { readJson, writeJson, sessionsDir } from './state.mjs'
 import {
@@ -86,7 +86,7 @@ async function cleanupOrphanLocked(env) {
   // a kill of an unrelated process. Only a process with our private owner
   // record may be signalled; dead PIDs need no signal at all.
   if (rec.pid && isAlive(rec.pid) && await ownsEndpointProcess(rec, env)) {
-    await terminate(rec.pid, { graceMs: 3000 })
+    await terminate(rec.pid, { graceMs: TERMINATE_GRACE_MS })
   }
   await clearEndpoint(env)
   await clearOwner(rec, env)
@@ -137,7 +137,7 @@ async function spawnBroker(env, timeoutMs) {
       if (settled) return
       settled = true
       cleanup()
-      if (isAlive(child.pid)) await terminate(child.pid, { graceMs: 3000 })
+      if (isAlive(child.pid)) await terminate(child.pid, { graceMs: TERMINATE_GRACE_MS })
       reject(error)
     }
 
@@ -152,7 +152,7 @@ async function spawnBroker(env, timeoutMs) {
       settled = true
       cleanup()
       if (code !== 0) {
-        if (isAlive(reported.pid)) await terminate(reported.pid, { graceMs: 3000 })
+        if (isAlive(reported.pid)) await terminate(reported.pid, { graceMs: TERMINATE_GRACE_MS })
         reject(new Error(
           `opencode broker exited with ${code ?? `signal ${signal}`}.\n${redact(stderr.trim(), password)}`,
         ))
@@ -224,7 +224,7 @@ async function ensureBrokerLocked(env, timeoutMs) {
     // This order is deliberate: the detached server must be terminated before
     // its endpoint/ownership state is removed, or startup failures leak a
     // server that later callers cannot safely identify.
-    if (rec?.pid && isAlive(rec.pid)) await terminate(rec.pid, { graceMs: 3000 })
+    if (rec?.pid && isAlive(rec.pid)) await terminate(rec.pid, { graceMs: TERMINATE_GRACE_MS })
     await clearEndpoint(env)
     await clearOwner(rec, env)
     throw error
@@ -592,7 +592,7 @@ async function shutdownBrokerLocked(env) {
 
   let outcome = 'gone'
   if (rec.pid && isAlive(rec.pid) && await ownsEndpointProcess(rec, env)) {
-    const terminated = await terminate(rec.pid, { graceMs: 3000 })
+    const terminated = await terminate(rec.pid, { graceMs: TERMINATE_GRACE_MS })
     outcome = terminated === 'gone' ? 'gone' : 'stopped'
   }
   await clearEndpoint(env)
