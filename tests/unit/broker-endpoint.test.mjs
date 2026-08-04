@@ -92,3 +92,11 @@ test('a freshly created partial lock is not treated as stale', async () => {
   assert.equal(await acquireLock(env), false)
   await releaseLock(env)
 })
+
+test('a freshly written malformed JSON lock is not treated as stale', async () => {
+  const env = await sandbox()
+  await mkdir(join(env.XDG_STATE_HOME, 'opencode-plugin-cc', 'broker'), { recursive: true })
+  await writeFile(lockPath(env), '{}')
+  assert.equal(await acquireLock(env), false)
+  await releaseLock(env)
+})

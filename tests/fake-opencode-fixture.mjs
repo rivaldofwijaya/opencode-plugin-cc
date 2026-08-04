@@ -324,6 +324,7 @@ if (argv[0] === 'serve') {
     }
 
     if (url.pathname === '/doc' && req.method === 'GET') {
+      if (fault === 'no-health') return send(503, { error: 'health unavailable' })
       return send(200, { openapi: '3.0.0', paths: { '/session': {}, '/global/event': {} } })
     }
 

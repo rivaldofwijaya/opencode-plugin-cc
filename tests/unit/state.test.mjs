@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, appendFile, stat } from 'node:fs/promises'
+import { mkdtemp, appendFile, chmod, mkdir, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -78,18 +78,25 @@ test('state directories and files are private, including an existing state tree'
   const d = await mkdtemp(join(tmpdir(), 'ocstate-'))
   const env = { XDG_STATE_HOME: d, HOME: '/unused' }
   const root = stateRoot(env)
-  await ensureDir(root)
-  await ensureDir(jobsDir(env))
-  await ensureDir(sessionsDir(env))
-  await ensureDir(transfersDir(env))
+  const legacyJob = join(jobsDir(env), 'legacy-job')
+  const legacyDirectories = [root, jobsDir(env), sessionsDir(env), transfersDir(env), legacyJob]
+  for (const directory of legacyDirectories) {
+    await mkdir(directory, { recursive: true, mode: 0o755 })
+    await chmod(directory, 0o755)
+  }
+
+  // One operation on a nested state path must repair the legacy-shaped tree;
+  // calling ensureDir on each ancestor would only test the old leaf behavior.
+  await ensureDir(legacyJob)
+  for (const directory of [...legacyDirectories]) {
+    assert.equal((await stat(directory)).mode & 0o777, 0o700, directory)
+  }
+
   await writeJson(join(jobsDir(env), 'prompt.json'), { prompt: 'secret' })
   await appendJsonl(join(sessionsDir(env), 'events.jsonl'), { event: 'secret' })
   await writeJson(join(transfersDir(env), 'handoff.md'), { conversation: 'secret' })
   await logHookFailure({ hook: 'test', event: 'x', error: new Error('secret'), env })
 
-  for (const directory of [root, jobsDir(env), sessionsDir(env), transfersDir(env)]) {
-    assert.equal((await stat(directory)).mode & 0o777, 0o700, directory)
-  }
   for (const file of [
     join(jobsDir(env), 'prompt.json'),
     join(sessionsDir(env), 'events.jsonl'),

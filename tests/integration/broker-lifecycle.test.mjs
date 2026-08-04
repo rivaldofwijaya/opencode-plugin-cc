@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -544,5 +544,39 @@ test('startup timeout terminates the detached child before clearing state', asyn
     await startup.catch(() => {})
     if (childPid && isAlive(childPid)) await terminate(childPid, { graceMs: 1000 })
     await shutdownBroker(env)
+  }
+})
+
+test('startup health failure preserves records when broker identity is unavailable', async (t) => {
+  const env = await sandbox()
+  const psDir = join(env.XDG_STATE_HOME, 'ps-bin')
+  const originalPath = env.PATH
+  await mkdir(psDir, { recursive: true, mode: 0o700 })
+  await writeFile(join(psDir, 'ps'), '#!/bin/sh\nexit 1\n', { mode: 0o700 })
+  await chmod(join(psDir, 'ps'), 0o700)
+  env.PATH = `${psDir}:${originalPath || ''}`
+  env.FAKE_OPENCODE_FAULT = 'no-health'
+
+  try {
+    let error
+    try {
+      await ensureBroker({ env, timeoutMs: 1000 })
+    } catch (caught) {
+      error = caught
+    }
+    if (bindFailure(error)) {
+      t.skip(`loopback binding is unavailable in this sandbox: ${error.message}`)
+      return
+    }
+    assert.ok(error)
+    assert.match(error.message, /records remain for repair/)
+    assert.match(error.message, /run \/opencode:repair again/)
+    const endpoint = await readEndpoint(env)
+    assert.ok(endpoint)
+    assert.ok(await readJson(join(brokerDir(env), 'owner.json'), null))
+    assert.equal(isAlive(endpoint.pid), true)
+  } finally {
+    env.PATH = originalPath
+    await shutdownBroker(env).catch(() => {})
   }
 })
