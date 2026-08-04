@@ -1,0 +1,11 @@
+{
+  "name": "opencode-plugin-cc",
+  "owner": { "name": "opencode-plugin-cc" },
+  "plugins": [
+    {
+      "name": "opencode",
+      "source": "./",
+      "description": "Delegate code review and coding tasks to the opencode CLI."
+    }
+  ]
+}
