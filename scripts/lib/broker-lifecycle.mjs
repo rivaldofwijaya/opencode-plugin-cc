@@ -33,6 +33,7 @@ const BROKER_PROCESS_LOOKUP_TIMEOUT_MS = 1_000
 const BROKER_START_TIME_TOLERANCE_MS = 2_000
 const MIN_PLAUSIBLE_PID = 2
 const MAX_PLAUSIBLE_PID = 4_194_304
+const BROKER_IDENTITY_FAILURE_DETAIL = 'broker process identity could not be proven; records remain for repair. Stop the process with the recorded PID, then run /opencode:repair again.'
 
 function clientFor(rec) {
   return new OpencodeClient(baseUrlFor(rec), { password: rec.password })
@@ -66,15 +67,39 @@ function parseProcessStart(value) {
     if (numeric >= 1_000_000_000) return numeric * 1_000
     return null
   }
-  const parsed = Date.parse(text)
-  return Number.isFinite(parsed) ? parsed : null
+  const match = text.match(/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})$/)
+  if (!match) return null
+  const months = {
+    Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
+    Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11,
+  }
+  const [, monthName, dayText, hourText, minuteText, secondText, yearText] = match
+  const year = Number(yearText)
+  const month = months[monthName]
+  const day = Number(dayText)
+  const hour = Number(hourText)
+  const minute = Number(minuteText)
+  const second = Number(secondText)
+  const parsed = Date.UTC(year, month, day, hour, minute, second)
+  const date = new Date(parsed)
+  return date.getUTCFullYear() === year
+    && date.getUTCMonth() === month
+    && date.getUTCDate() === day
+    && date.getUTCHours() === hour
+    && date.getUTCMinutes() === minute
+    && date.getUTCSeconds() === second
+    ? parsed
+    : null
 }
 
 async function processIdentity(pid, env) {
   let result
   try {
     result = await run('ps', ['-p', String(pid), '-o', 'lstart=', '-o', 'command='], {
-      env,
+      // BSD ps emits lstart in the process locale and without an offset. Keep
+      // both the output and its interpretation deterministic, regardless of
+      // the caller's locale or timezone.
+      env: { ...env, LC_ALL: 'C', LANG: 'C', TZ: 'UTC' },
       timeoutMs: BROKER_PROCESS_LOOKUP_TIMEOUT_MS,
     })
   } catch {
@@ -114,6 +139,19 @@ async function ownsEndpointProcess(rec, env) {
     && /(?:^|\s)--hostname(?:=|\s+)127\.0\.0\.1(?:\s|$)/.test(identity.command)
 }
 
+async function terminateOwnedBroker(rec, env) {
+  if (!rec?.pid || !isAlive(rec.pid)) return { outcome: 'gone', protected: false }
+  if (!await ownsEndpointProcess(rec, env)) return { outcome: 'unverified', protected: true }
+  const terminated = await terminate(rec.pid, { graceMs: TERMINATE_GRACE_MS })
+  return { outcome: terminated === 'gone' ? 'gone' : 'stopped', protected: false }
+}
+
+function preserveBrokerRecords(error) {
+  const wrapped = new Error(`${error.message}\n${BROKER_IDENTITY_FAILURE_DETAIL}`, { cause: error })
+  wrapped.preserveBrokerRecords = true
+  return wrapped
+}
+
 async function clearOwner(rec, env) {
   const owner = await readJson(ownerPath(env), null)
   const recordMatches = rec && owner?.pid === rec.pid
@@ -148,10 +186,10 @@ async function cleanupOrphanLocked(env) {
   // a kill of an unrelated process. Both our private record and the live
   // process command line must agree; otherwise leave the record for repair.
   if (rec.pid && isAlive(rec.pid)) {
-    if (!await ownsEndpointProcess(rec, env)) {
+    const termination = await terminateOwnedBroker(rec, env)
+    if (termination.protected) {
       return { cleared: false, protected: true }
     }
-    await terminate(rec.pid, { graceMs: TERMINATE_GRACE_MS })
   }
   await clearEndpoint(env)
   await clearOwner(rec, env)
@@ -222,10 +260,14 @@ async function spawnBroker(env, timeoutMs) {
       settled = true
       cleanup()
       if (code !== 0) {
-        if (isAlive(reported.pid)) await terminate(reported.pid, { graceMs: TERMINATE_GRACE_MS })
-        reject(new Error(
+        const candidate = { ...reported, password, startedAt: reported.startedAt ?? startedAt }
+        await writeOwner(candidate, env)
+        await writeEndpoint(candidate, env)
+        const termination = await terminateOwnedBroker(candidate, env)
+        const failure = new Error(
           `opencode broker exited with ${code ?? `signal ${signal}`}.\n${redact(stderr.trim(), password)}`,
-        ))
+        )
+        reject(termination.protected ? preserveBrokerRecords(failure) : failure)
         return
       }
       resolve({ ...reported, password, startedAt: reported.startedAt ?? startedAt })
@@ -301,10 +343,20 @@ async function ensureBrokerLocked(env, timeoutMs) {
     // This order is deliberate: the detached server must be terminated before
     // its endpoint/ownership state is removed, or startup failures leak a
     // server that later callers cannot safely identify.
-    if (rec?.pid && isAlive(rec.pid)) await terminate(rec.pid, { graceMs: TERMINATE_GRACE_MS })
-    await clearEndpoint(env)
-    await clearOwner(rec, env)
-    throw error
+    let failure = error
+    let preserveRecords = Boolean(error?.preserveBrokerRecords)
+    if (!preserveRecords && rec?.pid && isAlive(rec.pid)) {
+      const termination = await terminateOwnedBroker(rec, env)
+      if (termination.protected) {
+        failure = preserveBrokerRecords(error)
+        preserveRecords = true
+      }
+    }
+    if (!preserveRecords) {
+      await clearEndpoint(env)
+      await clearOwner(rec, env)
+    }
+    throw failure
   }
 }
 
@@ -675,9 +727,9 @@ async function shutdownBrokerLocked(env) {
 
   let outcome = 'gone'
   if (rec.pid && isAlive(rec.pid)) {
-    if (!await ownsEndpointProcess(rec, env)) return 'unverified'
-    const terminated = await terminate(rec.pid, { graceMs: TERMINATE_GRACE_MS })
-    outcome = terminated === 'gone' ? 'gone' : 'stopped'
+    const termination = await terminateOwnedBroker(rec, env)
+    if (termination.protected) return 'unverified'
+    outcome = termination.outcome
   }
   await clearEndpoint(env)
   await clearOwner(rec, env)

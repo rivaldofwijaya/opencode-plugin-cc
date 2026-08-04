@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
-import { chmod, mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises'
+import { chmod, open, readFile, rename, stat, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
-import { brokerDir, readJson, writeJson } from './state.mjs'
+import { brokerDir, ensureDir, readJson, writeJson } from './state.mjs'
 import { isAlive } from './process.mjs'
 
 const STALE_LOCK_MS = 60_000
@@ -14,8 +14,7 @@ export const baseUrlFor = (rec) => `http://127.0.0.1:${rec.port}`
 
 async function ensurePrivateBrokerDir(env) {
   const dir = brokerDir(env)
-  await mkdir(dir, { recursive: true, mode: 0o700 })
-  await chmod(dir, 0o700)
+  await ensureDir(dir)
   return dir
 }
 
@@ -63,7 +62,14 @@ async function readLock(path) {
 async function lockIsStale(path) {
   const lock = await readLock(path)
   if (!lock) return true
-  if (!lock.record || typeof lock.record !== 'object') {
+  const record = lock.record
+  const validRecord = record
+    && typeof record === 'object'
+    && !Array.isArray(record)
+    && Number.isInteger(record.pid)
+    && record.pid > 0
+    && Number.isFinite(record.at)
+  if (!validRecord) {
     // A contender can observe the tiny interval between O_EXCL creation and
     // the owner's JSON write. Treat a fresh malformed/empty lock as live;
     // only an old one is eligible for stale recovery.
@@ -74,8 +80,8 @@ async function lockIsStale(path) {
       throw error
     }
   }
-  if (lock.record.pid && !isAlive(lock.record.pid)) return true
-  return Date.now() - (lock.record.at || 0) > STALE_LOCK_MS
+  if (!isAlive(record.pid)) return true
+  return Date.now() - record.at > STALE_LOCK_MS
 }
 
 async function removeStaleLock(path) {
