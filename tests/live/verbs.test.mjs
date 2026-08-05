@@ -54,12 +54,22 @@ test('live: transfer exports a handoff and seeds a real opencode session', { ski
 
   const handoff = await readFile(out, 'utf8')
   assert.match(handoff, /# Handoff from Claude Code/)
-  assert.match(handoff, new RegExp(env.CLAUDE_SESSION_ID))
-  assert.match(handoff, new RegExp(TRANSCRIPT_MARKER))
+  assert.ok(handoff.includes(env.CLAUDE_SESSION_ID), `handoff omitted session id ${env.CLAUDE_SESSION_ID}`)
+  assert.ok(handoff.includes(TRANSCRIPT_MARKER), `handoff omitted transcript marker ${TRANSCRIPT_MARKER}`)
+
+  assert.ok(
+    r.stdout.split('\n').includes(`Handoff written to ${out}`),
+    `transfer did not report the handoff path ${out}:\n${r.stdout}`,
+  )
 
   const seeded = r.stdout.match(/Seeded opencode session: (\S+)/)
   assert.ok(seeded, `transfer reported no seeded session:\n${r.stdout}`)
-  assert.match(r.stdout, new RegExp(`opencode --session ${seeded[1]}`))
+  assert.ok(r.stdout.includes(`opencode --session ${seeded[1]}`), `transfer reported no resume command for ${seeded[1]}`)
+  assert.notEqual(
+    seeded[1],
+    taskSession,
+    `transfer reused task session ${taskSession} instead of creating fresh session ${seeded[1]}`,
+  )
 
   // The seeded id is a real server-issued session, now owned by this CC session.
   assert.equal(await lastOpencodeSession(env.CLAUDE_SESSION_ID, env), seeded[1])
