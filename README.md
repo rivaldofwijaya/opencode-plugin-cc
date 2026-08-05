@@ -36,8 +36,13 @@ stored by opencode under
 |---|---|---|
 | `npm test` | Unit + integration against a fake opencode binary | free, no network |
 | `npm run test:isolated` | The real binary in a throwaway HOME with no credentials | free, no tokens |
-| `OPENCODE_LIVE=1 npm run test:live` | One review and one task against real credentials | spends tokens |
+| `OPENCODE_LIVE=1 npm run test:live` | Review, adversarial review, task, the background job lifecycle, the tool counter, and transfer against real credentials | spends tokens |
 
 `npm test` is the suite to run on every change. The isolated suite exercises the
 doctor ladder, `set-key`, and `set-model` against real opencode without touching
 your credentials. The live suite is opt-in.
+
+The live suite runs one file at a time; its tests share one broker, one state
+root, and one `repair` sweep. `OPENCODE_LIVE_TOOL_MODEL` overrides the model for
+the tool-counter test alone, for when the default model does not call tools
+reliably.
