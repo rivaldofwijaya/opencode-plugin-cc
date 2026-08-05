@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readFile, realpath } from 'node:fs/promises'
 import { join } from 'node:path'
 import { isAlive, run } from '../../scripts/lib/process.mjs'
 import { readJob } from '../../scripts/lib/tracked-jobs.mjs'
@@ -37,7 +37,14 @@ test('live: a backgrounded task completes and result reports its output', { skip
 
   const result = await run(process.execPath, [companion, 'result', jobId], { cwd: d, env, timeoutMs: 300000 })
   assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)
-  assert.match(result.stdout, new RegExp(`opencode task ${jobId} — done`))
+  assert.ok(
+    result.stdout.includes(`opencode task ${jobId} — done`),
+    `result ${jobId} omitted its completed header:\n${result.stdout}`,
+  )
+  assert.ok(
+    result.stdout.split('\n').includes(`Target: cwd=${await realpath(d)}`),
+    `result ${jobId} omitted its target line:\n${result.stdout}`,
+  )
   assert.match(result.stdout.toLowerCase(), /ready/, `the detached worker accumulated no model text:\n${result.stdout}`)
 })
 
@@ -75,9 +82,8 @@ test('live: cancelling a backgrounded task kills its worker process', { skip }, 
 
   const cancelled = await run(process.execPath, [companion, 'cancel', jobId], { cwd: d, env, timeoutMs: 120000 })
   assert.equal(cancelled.code, 0, `${cancelled.stdout}\n${cancelled.stderr}`)
-  assert.match(
-    cancelled.stdout,
-    new RegExp(`Cancelled task ${jobId}; state is cancelled`),
+  assert.ok(
+    cancelled.stdout.includes(`Cancelled task ${jobId}; state is cancelled`),
     `cancel did not take the cancelled branch (the job likely finished first): ${cancelled.stdout}`,
   )
 
@@ -118,7 +124,7 @@ test('live: a task that writes a file reports a non-zero tool count', { skip }, 
       + `Set OPENCODE_LIVE_TOOL_MODEL to a model that uses tools reliably. Model output:\n${r.stdout}`,
     )
   }
-  assert.match(written, new RegExp(TOOL_PROBE_TEXT))
+  assert.ok(written.includes(TOOL_PROBE_TEXT), `the tool-created file had unexpected contents: ${written}`)
 
   // Only now is a zero counter a real defect.
   // This session ran exactly one job, so matching its verb is unambiguous.

@@ -3,7 +3,9 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { cancelJob } from '../../scripts/lib/job-control.mjs'
 import { run } from '../../scripts/lib/process.mjs'
+import { listJobs } from '../../scripts/lib/tracked-jobs.mjs'
 
 export const companion = fileURLToPath(new URL('../../scripts/opencode-companion.mjs', import.meta.url))
 export const live = process.env.OPENCODE_LIVE === '1'
@@ -14,6 +16,7 @@ export const toolModel = process.env.OPENCODE_LIVE_TOOL_MODEL || model
 const repos = new Set()
 const liveSessionEnvs = new Set()
 let liveSessionCounter = 0
+const TERMINAL_JOB_STATES = new Set(['done', 'failed', 'cancelled', 'timed-out', 'stale'])
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -94,6 +97,26 @@ afterEach(async () => {
   liveSessionEnvs.clear()
 
   for (const env of pendingSessions) {
+    try {
+      const jobs = await listJobs(env.CLAUDE_SESSION_ID, env)
+      for (const job of jobs) {
+        if (TERMINAL_JOB_STATES.has(job.state)) continue
+        try {
+          await cancelJob(job.id, env)
+        } catch (error) {
+          warn(
+            `[live cleanup] cancel failed for ${job.id} in ${env.CLAUDE_SESSION_ID}; `
+            + `error: ${error?.message ?? String(error)}`,
+          )
+        }
+      }
+    } catch (error) {
+      warn(
+        `[live cleanup] could not enumerate jobs for ${env.CLAUDE_SESSION_ID}; `
+        + `error: ${error?.message ?? String(error)}`,
+      )
+    }
+
     try {
       const repair = await run(process.execPath, [companion, 'repair'], { env, timeoutMs: 120000 })
       if (repair.code !== 0) {

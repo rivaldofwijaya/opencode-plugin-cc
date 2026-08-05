@@ -45,4 +45,7 @@ your credentials. The live suite is opt-in.
 The live suite runs one file at a time; its tests share one broker, one state
 root, and one `repair` sweep. `OPENCODE_LIVE_TOOL_MODEL` overrides the model for
 the tool-counter test alone, for when the default model does not call tools
-reliably.
+reliably. `OPENCODE_LIVE_MODEL` overrides the default model for the whole live
+suite. The default free model intermittently returns empty output, which
+surfaces as a review-JSON parse failure, so a stronger model is worth setting
+when the live suite is used as a gate.
