@@ -20,7 +20,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 export function liveEnv(extra = {}) {
   const env = {
     ...process.env,
-    CLAUDE_SESSION_ID: `cc-live-${process.pid}-${++liveSessionCounter}`,
+    CLAUDE_SESSION_ID: `cc-${process.pid.toString(16)}-${(++liveSessionCounter).toString(16)}`,
     ...extra,
   }
   liveSessionEnvs.add(env)
