@@ -1,8 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { isAlive, run } from '../../scripts/lib/process.mjs'
 import { readJob } from '../../scripts/lib/tracked-jobs.mjs'
-import { companion, live, model, liveEnv, repo, pollStatus, jobState } from './helpers.mjs'
+import { companion, live, model, toolModel, liveEnv, repo, pollStatus, jobLine, jobState } from './helpers.mjs'
 
 const skip = !live && 'set OPENCODE_LIVE=1 to run'
 const TERMINAL = new Set(['done', 'failed', 'cancelled', 'timed-out', 'stale'])
@@ -84,4 +86,48 @@ test('live: cancelling a backgrounded task kills its worker process', { skip }, 
 
   const after = await readJob(jobId, env)
   assert.equal(after?.state, 'cancelled', `job record was not cancelled: ${JSON.stringify(after)}`)
+})
+
+const TOOL_PROBE_FILE = 'tool-probe.txt'
+const TOOL_PROBE_TEXT = 'tool-probe-ok'
+
+test('live: a task that writes a file reports a non-zero tool count', { skip }, async () => {
+  const d = await repo()
+  const env = liveEnv()
+
+  const r = await run(
+    process.execPath,
+    [
+      companion, 'task', '--wait', '--model', toolModel, '--',
+      `Create a file named ${TOOL_PROBE_FILE} in the current directory. `
+      + `Its entire contents must be exactly this one line: ${TOOL_PROBE_TEXT}. `
+      + 'Use your file-writing tool to create it. Then reply with the single word: done.',
+    ],
+    { cwd: d, env, timeoutMs: 300000 },
+  )
+  assert.equal(r.code, 0, `${r.stdout}\n${r.stderr}`)
+
+  // Ground truth first: if the file is absent the model never called a tool,
+  // which is a model/configuration problem, not a counter regression.
+  let written
+  try {
+    written = await readFile(join(d, TOOL_PROBE_FILE), 'utf8')
+  } catch (error) {
+    assert.fail(
+      `the model did not call a tool: ${TOOL_PROBE_FILE} was never written (${error.code}). `
+      + `Set OPENCODE_LIVE_TOOL_MODEL to a model that uses tools reliably. Model output:\n${r.stdout}`,
+    )
+  }
+  assert.match(written, new RegExp(TOOL_PROBE_TEXT))
+
+  // Only now is a zero counter a real defect.
+  // This session ran exactly one job, so matching its verb is unambiguous.
+  const status = await pollStatus(env, d, (out) => jobLine(out, 'task') !== null, { timeoutMs: 30000, intervalMs: 1000 })
+  const line = jobLine(status, 'task')
+  assert.ok(line, `no task job was listed for this session:\n${status}`)
+  const tools = line.match(/(\d+) tools/)
+  assert.ok(
+    tools && Number(tools[1]) > 0,
+    `a tool ran (${TOOL_PROBE_FILE} exists) but status reported no tool count:\n${line}`,
+  )
 })
