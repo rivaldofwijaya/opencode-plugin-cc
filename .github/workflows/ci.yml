@@ -1,0 +1,32 @@
+name: CI
+
+# Only the hermetic suite runs here. `npm run test:isolated` needs a real
+# opencode binary and `npm run test:live` needs real credentials and spends
+# tokens, so both stay local and are documented in the README instead.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The project has no dependencies, so there is nothing to install.
+      - name: Show environment
+        run: node --version && npm --version
+
+      - name: Unit, integration, and command lint
+        run: npm test
