@@ -1,4 +1,4 @@
-# opencode-plugin-cc — Design
+# opencode-plugin-cc: Design
 
 Date: 2026-08-02
 Status: Approved for planning
@@ -31,7 +31,7 @@ these; re-verify if the floor version moves.
 | Fact | Value |
 |---|---|
 | opencode version | 1.18.11 |
-| Install path | `~/.opencode/bin/opencode` — **not on PATH** in a non-login shell |
+| Install path | `~/.opencode/bin/opencode` (**not on PATH** in a non-login shell) |
 | Credentials | `~/.local/share/opencode/auth.json`, mode 0600. OpenRouter configured |
 | Global config | `~/.config/opencode/opencode.json` **absent** → no default `model` |
 | Models available | 343, listed as `provider/model` strings by `opencode models` |
@@ -95,7 +95,7 @@ tests/           fake-opencode-fixture.mjs  unit/  integration/  isolated/
 
 ```
 /opencode:review
-    │  (commands/review.md — prompt-level policy: scope, wait vs background)
+    │  (commands/review.md - prompt-level policy: scope, wait vs background)
     ▼  Bash
 opencode-companion.mjs review [flags]
     │  ensure-broker (spawn-once: lockfile + portfile)
@@ -167,7 +167,7 @@ tested without reading its consumers.
 | hermetic test run | `--pure` | excludes the user's own opencode plugins |
 
 `--auto` auto-approves permissions that are not explicitly denied. It is required
-for headless jobs — without it a background job blocks forever on a prompt nobody
+for headless jobs. Without it a background job blocks forever on a prompt nobody
 can see. Safety comes from the agent definition, not from the prompt loop: the
 review agent denies `edit` and `bash`, so auto-approval grants nothing dangerous.
 Rescue runs with write access by design, which is the point of rescue.
@@ -185,7 +185,7 @@ Rescue runs with write access by design, which is the point of rescue.
 ## 5. Commands
 
 All eight commands from codex-plugin-cc ship in v1. Every command returns companion
-stdout **verbatim** — no paraphrase, summary, or added commentary.
+stdout **verbatim**, with no paraphrase, summary, or added commentary.
 
 ### 5.1 `/opencode:review`
 
@@ -210,7 +210,7 @@ The companion collects the diff itself and sends it as the prompt payload, so th
 model never needs `bash` to see the change; `read` stays available for surrounding
 context. Output is validated against
 `schemas/review-output.schema.json` (findings: file, line, severity, confidence,
-body) and rendered by `render.mjs`. Unparseable output is rendered raw with a note —
+body) and rendered by `render.mjs`. Unparseable output is rendered raw with a note,
 never discarded.
 
 No staged-only or unstaged-only review, and no extra focus text; that is
@@ -246,11 +246,11 @@ opencode session seeded with it, and prints the session ID plus the exact
 
 ### 5.5 Job control
 
-- `status` — jobs for this CC session: id, verb, state, elapsed, step and token
+- `status`: jobs for this CC session: id, verb, state, elapsed, step and token
   counters read from the SSE tail.
-- `result <jobId>` — rendered output of a finished job, or the partial tail with a
+- `result <jobId>`: rendered output of a finished job, or the partial tail with a
   "still running" banner.
-- `cancel <jobId|--all>` — `POST /session/:id/abort`, then SIGTERM the tracked
+- `cancel <jobId|--all>`: `POST /session/:id/abort`, then SIGTERM the tracked
   process if it does not settle within a grace period.
 
 Job records are namespaced per Claude Code session: a second Claude window neither
@@ -275,13 +275,13 @@ exists and is logged in.
 command calls it first and stops with a specific gap plus "run `/opencode:setup`"
 rather than a stack trace.
 
-1. **Binary** — resolve per §4.4, run `--version`, compare against the declared
+1. **Binary**: resolve per §4.4, run `--version`, compare against the declared
    floor (1.18.0). Missing → platform install instructions.
-2. **Auth** — parse `opencode auth list`; cross-check provider env vars already
+2. **Auth**: parse `opencode auth list`; cross-check provider env vars already
    present in the environment.
-3. **Model** — resolve the effective default: project `opencode.json` → global
+3. **Model**: resolve the effective default: project `opencode.json` → global
    `~/.config/opencode/opencode.json`. Absent → unconfigured.
-4. **Server** — start `opencode serve` and reach `GET /doc`. Catches port and
+4. **Server**: start `opencode serve` and reach `GET /doc`. Catches port and
    sandbox problems before a job hangs silently.
 
 ### 6.2 Guided onboarding
@@ -303,7 +303,7 @@ ready-to-run command with a placeholder:
 opencode-companion.mjs set-key --provider <provider> --key <API_KEY>
 ```
 
-The user substitutes the key and runs it — in-session by prefixing `!`, so the
+The user substitutes the key and runs it, in-session by prefixing `!`, so the
 output lands in the conversation and Claude can verify immediately.
 
 `set-key` requirements:
@@ -324,9 +324,9 @@ green status is never asserted on the basis of an unverified write.
 
 ### 6.3 Other setup verbs
 
-- `--gate on|off` — toggle the `Stop` review gate.
-- `--status` — doctor report as a readable table.
-- `--repair` — clear a stale broker portfile/lock and orphaned job records.
+- `--gate on|off`: toggle the `Stop` review gate.
+- `--status`: doctor report as a readable table.
+- `--repair`: clear a stale broker portfile/lock and orphaned job records.
 
 ## 7. Failure handling
 
@@ -360,7 +360,7 @@ the developer's credentials:
 
 - Fresh install: nothing configured at all.
 - Auth present, default model missing (the dev machine's current state).
-- User asks for a model whose provider has no credential — assert setup guides
+- User asks for a model whose provider has no credential; assert setup guides
   rather than crashes.
 - The doctor ladder, the setup walkthrough, `set-key` and `set-model` writes, and
   post-write re-verification.
@@ -369,7 +369,7 @@ the developer's credentials:
 
 `tests/fake-opencode-fixture.mjs` impersonates the binary and is placed first on
 PATH; the companion runs unmodified against it. It implements `--version`,
-`auth list`, `models`, and `serve` — where `serve` stands up a real HTTP server
+`auth list`, `models`, and `serve`, where `serve` stands up a real HTTP server
 providing `/doc`, `POST /session`, `POST /session/:id/prompt_async`,
 `GET /global/event` (SSE), and `POST /session/:id/abort`, replaying scripted event
 sequences.
@@ -380,7 +380,7 @@ disconnect, malformed JSON, non-zero exit, port already bound, orphaned lockfile
 ### 8.4 Unit coverage
 
 Argument parsing, scope resolution, diff sizing, `render.mjs` output, schema
-validation, and — most heavily — the credential and config writers: merge preserves
+validation, and, most heavily, the credential and config writers: merge preserves
 siblings, mode is `0600`, writes are atomic, backups are taken. That is where silent
 data loss would live.
 
