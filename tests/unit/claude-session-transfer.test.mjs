@@ -87,6 +87,22 @@ test('validateCcSessionId accepts bounded safe ids and rejects an unsafe boundar
   )
 })
 
+test('validateCcSessionId accepts any alphanumeric id, not only hexadecimal ones', () => {
+  assert.equal(validateCcSessionId('cc-task'), 'cc-task')
+  assert.equal(validateCcSessionId('66f235fd-542b-47cd-b0d5-3a0160357ff3'), '66f235fd-542b-47cd-b0d5-3a0160357ff3')
+  assert.equal(validateCcSessionId('Zz9_-'), 'Zz9_-')
+})
+
+test('validateCcSessionId still rejects anything unsafe as a path component', () => {
+  for (const bad of ['../../evil', 'a/b', 'bad id!', 'dot.dot', '..', '']) {
+    assert.throws(
+      () => validateCcSessionId(bad),
+      error => error?.code === 'INVALID_SESSION_ID',
+      JSON.stringify(bad),
+    )
+  }
+})
+
 test('ccSessionId uses a valid fallback and honors the alternate environment name', () => {
   assert.equal(ccSessionId({}), '0')
   assert.equal(ccSessionId({ CLAUDE_CODE_SESSION_ID: 'face' }), 'face')

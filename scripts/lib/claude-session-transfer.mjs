@@ -4,7 +4,10 @@ import { stateRoot, ensureDir } from './state.mjs'
 import { atomicWrite } from './fs.mjs'
 
 const MAX_CC_SESSION_ID_LENGTH = 128
-const CC_SESSION_ID_PATTERN = /^[A-Fa-f0-9_-]+$/
+// Wide enough for any id Claude Code emits (UUIDs today), narrow enough that
+// the id is always safe as a single path component. Dots and separators stay
+// out so it can never traverse or escape the state root.
+const CC_SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/
 
 export function validateCcSessionId(value) {
   const id = typeof value === 'string' ? value : ''
@@ -14,7 +17,7 @@ export function validateCcSessionId(value) {
     || !CC_SESSION_ID_PATTERN.test(id)
   ) {
     const error = new Error(
-      `invalid Claude Code session id: expected 1-${MAX_CC_SESSION_ID_LENGTH} hexadecimal, dash, or underscore characters`,
+      `invalid Claude Code session id: expected 1-${MAX_CC_SESSION_ID_LENGTH} letter, digit, dash, or underscore characters`,
     )
     error.code = 'INVALID_SESSION_ID'
     error.transferKind = 'invalid-session-id'

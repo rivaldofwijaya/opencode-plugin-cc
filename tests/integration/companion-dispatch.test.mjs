@@ -181,3 +181,31 @@ test('a doctor gap is reported on stdout and points at setup', async () => {
   assert.match(r.stdout, /Run \/opencode:setup/)
   assert.equal(r.stderr, '')
 })
+
+for (const verb of ['status', 'task', 'review']) {
+  test(`${verb} rejects a malformed CLAUDE_SESSION_ID the same way transfer does`, async () => {
+    const e = await env({ CLAUDE_SESSION_ID: '../../evil' })
+    const r = await run(process.execPath, [companion, verb], { env: e.env })
+    assert.equal(r.code, 2)
+    assert.match(r.stderr, /invalid Claude Code session id/)
+    assert.equal(r.stdout, '')
+  })
+}
+
+test('every session-scoped verb reports a malformed session id identically', async () => {
+  const e = await env({ CLAUDE_SESSION_ID: 'bad id!' })
+  const messages = []
+  for (const verb of ['status', 'result', 'cancel', 'task', 'review', 'adversarial-review', 'transfer']) {
+    const r = await run(process.execPath, [companion, verb], { env: e.env })
+    assert.equal(r.code, 2, verb)
+    messages.push(r.stderr.trim())
+  }
+  assert.equal(new Set(messages).size, 1, `differing messages: ${JSON.stringify(messages)}`)
+})
+
+test('a verb that never reads the session id is unaffected by a malformed one', async () => {
+  const e = await env({ OPENCODE_BIN: '/nonexistent/opencode', PATH: '/nonexistent', CLAUDE_SESSION_ID: '../../evil' })
+  const r = await run(process.execPath, [companion, 'doctor', '--json'], { env: e.env })
+  assert.equal(r.code, 1)
+  assert.equal(JSON.parse(r.stdout).ok, false)
+})
