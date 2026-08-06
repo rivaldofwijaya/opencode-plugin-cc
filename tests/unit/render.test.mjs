@@ -49,6 +49,21 @@ test('renderReview prints raw output with a note when parsing failed', () => {
   assert.match(out, /no JSON object found/)
 })
 
+test('renderReview distinguishes an empty model response from unparseable output', () => {
+  const out = renderReview({ ok: false, empty: true, findings: [], summary: null, raw: '', error: 'the model returned no output' },
+    { scope: 'working-tree', base: null, truncated: false, jobId: 'job_1' })
+  assert.match(out, /returned no output/i)
+  assert.doesNotMatch(out, /could not be parsed/i)
+  assert.doesNotMatch(out, /\(empty\)/)
+  assert.doesNotMatch(out, /Raw output follows/i)
+})
+
+test('renderReview suggests a retry or a different model when the response was empty', () => {
+  const out = renderReview({ ok: false, empty: true, findings: [], summary: null, raw: '', error: 'the model returned no output' },
+    { scope: 'working-tree', base: null, truncated: false, jobId: 'job_1' })
+  assert.match(out, /again|retry|another model|different model/i)
+})
+
 test('renderReview notes a truncated diff', () => {
   const out = renderReview({ ok: true, summary: 's', findings: [] }, { scope: 'working-tree', base: null, truncated: true, jobId: 'job_1' })
   assert.match(out, /truncated/i)

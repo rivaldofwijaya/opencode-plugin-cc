@@ -57,6 +57,16 @@ const SESSION_STATE_VERBS = new Set([
   'transfer',
 ])
 
+// Every verb that scopes state by the Claude Code session id enforces one
+// contract for it, so a malformed id fails the same way whichever verb sees it
+// first rather than only where it happens to reach a path guard.
+const SESSION_SCOPED_VERBS = new Set([
+  ...SESSION_STATE_VERBS,
+  'status',
+  'result',
+  'cancel',
+])
+
 // These later handlers intentionally bypass the doctor preflight while they
 // repair or inspect setup state: setup, set-key, set-model, gate, repair,
 // review-size, task-resume-candidate, status, result, and cancel.
@@ -741,6 +751,14 @@ function jobStartDescription(job) {
   return started ? ` (${started})` : ''
 }
 
+function ensureValidSessionId(value) {
+  try {
+    return validateCcSessionId(value)
+  } catch (error) {
+    throw new CompanionError(error.message, EXIT_CODES.INVALID_INVOCATION)
+  }
+}
+
 function ensurePersistedSessionPath({ env, ccSessionId }) {
   try {
     persistedSessionPath({ env, ccSessionId })
@@ -1062,7 +1080,9 @@ async function main(argv, env = process.env, cwd = process.cwd()) {
   }
 
   try {
-    const sessionId = ccSessionId(env)
+    const sessionId = SESSION_SCOPED_VERBS.has(verb)
+      ? ensureValidSessionId(ccSessionId(env))
+      : ccSessionId(env)
     if (SESSION_STATE_VERBS.has(verb)) {
       ensurePersistedSessionPath({ env, ccSessionId: sessionId })
     }
