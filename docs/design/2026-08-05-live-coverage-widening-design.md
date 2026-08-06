@@ -5,8 +5,8 @@ Status: approved design, not yet implemented
 
 ## Problem
 
-`tests/live/smoke.test.mjs` holds two tests — `review --wait` and `task --wait`
-— against a real opencode server. Everything else the plugin does has only ever
+`tests/live/smoke.test.mjs` holds two tests, `review --wait` and `task --wait`,
+against a real opencode server. Everything else the plugin does has only ever
 been exercised against `tests/fake-opencode-fixture.mjs`.
 
 That distinction is not academic here. The last live run found two critical
@@ -27,7 +27,7 @@ have unit coverage against the fixture and none against a real process.
 
 **The `tool` counter is ungrounded.** `renderJobList` reports `N tools` from
 `job.counters.tools`, but no run has ever observed a real tool part. It is
-untested by construction — the same shape of defect as the event-name bug.
+untested by construction, the same shape of defect as the event-name bug.
 
 ## Non-goals
 
@@ -77,33 +77,33 @@ first run whose output satisfies `predicate`. On timeout it rejects with a
 message containing the last stdout it saw, so a failure reports the state the
 job was actually in rather than only that time ran out.
 
-### Background lifecycle — two jobs
+### Background lifecycle: two jobs
 
 `cancel` needs a job that is still running; `result` needs one that finished.
 One job cannot serve both without one of the two assertions becoming
 conditional, so the chain is split across two jobs. The cost is one extra model
 call.
 
-**Job A — completion chain.** In a fresh repo:
+**Job A: completion chain.** In a fresh repo:
 
 1. `task --background --model <m> -- <short prompt>`; parse the job id out of
    `Started task as <jobId>.`
 2. `pollStatus` until that job id appears with state `running`.
 3. `pollStatus` until it reports a finished state.
-4. `result <jobId>` — assert exit code 0 and that the rendered output carries
+4. `result <jobId>`: assert exit code 0 and that the rendered output carries
    the model's answer.
 
 Step 4 is the first time a real model stream is accumulated by a detached
 broker rather than in-process, which makes it the first real test of the
 broker's handling of `message.part.delta`.
 
-**Job B — cancel chain.** In a fresh repo:
+**Job B: cancel chain.** In a fresh repo:
 
 1. `task --background` with a prompt that generates sustained output, so the
    job is reliably still running when cancel fires.
 2. `pollStatus` until state is `running`; capture the broker/child pid from
    job state.
-3. `cancel <jobId>` — assert stdout matches the cancelled branch
+3. `cancel <jobId>`: assert stdout matches the cancelled branch
    (`Cancelled task <jobId>; state is cancelled`), not the
    `had already finished ... nothing to cancel` branch. Asserting the specific
    branch is what stops this test from passing on a job that simply finished
@@ -127,7 +127,7 @@ named file.
 2. Only then assert the rendered output reports a non-zero tool count.
 
 The order matters. If the file is absent the test fails with a message saying
-the model did not call a tool — a model or configuration problem — so a weak
+the model did not call a tool, a model or configuration problem, so a weak
 model never reads as a counter regression. If the file is present and the
 counter is zero, that is a real counter defect.
 
@@ -145,7 +145,7 @@ code 0 and that the output renders as a review.
 Exit code 0 is a real assertion here, not a formality: `reviewExitCode` returns
 `GAP` when the job failed or cancelled *or* when the model's output did not
 parse against the review schema. Findings do not affect it. So a 0 proves the
-adversarial prompt produced schema-valid output from a real model — which is
+adversarial prompt produced schema-valid output from a real model, which is
 exactly the thing a fixture cannot prove. It does not assert any particular
 finding.
 
