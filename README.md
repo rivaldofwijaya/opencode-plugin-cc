@@ -22,7 +22,7 @@ Asking a model to review its own code is a weak check, it tends to agree with
 itself. This plugin gets you a genuinely independent opinion:
 
 - **A different model, a different vendor.** opencode runs whatever you point it
-  at — Claude, GPT, Gemini, DeepSeek, Qwen, or a local model through Ollama.
+  at Claude, GPT, Gemini, DeepSeek, Qwen, or a local model through Ollama.
 - **Real separation.** opencode runs as its own process with its own context. It
   sees your diff, not your conversation.
 - **Non-blocking.** Send a job to the background and keep working; collect the
