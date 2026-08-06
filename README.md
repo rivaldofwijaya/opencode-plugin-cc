@@ -5,8 +5,8 @@
 
 **A Claude Code plugin that delegates code review and coding tasks to
 [opencode](https://opencode.ai).** It adds slash commands like
-`/opencode:review` and `/opencode:rescue` so a second AI model — running in its
-own process, on a provider you choose — reviews your work or takes over a task,
+`/opencode:review` and `/opencode:rescue` so a second AI model, running in its
+own process, on a provider you choose, reviews your work or takes over a task,
 instead of the same model checking its own output.
 
 If you have been looking for something like
@@ -18,7 +18,7 @@ maintainers.
 
 ## Why use it
 
-Asking a model to review its own code is a weak check — it tends to agree with
+Asking a model to review its own code is a weak check, it tends to agree with
 itself. This plugin gets you a genuinely independent opinion:
 
 - **A different model, a different vendor.** opencode runs whatever you point it
@@ -56,7 +56,7 @@ itself. This plugin gets you a genuinely independent opinion:
 - [opencode](https://opencode.ai) 1.18.0 or newer, on your `PATH`
   ([anomalyco/opencode](https://github.com/anomalyco/opencode))
 - Node.js 22 or newer
-- Credentials for at least one model provider — `/opencode:setup` walks you through it
+- Credentials for at least one model provider, `/opencode:setup` walks you through it
 
 ## Install
 
@@ -71,7 +71,7 @@ Then run setup once and follow what it asks for:
 /opencode:setup
 ```
 
-It checks four things — binary, credentials, model, server — and stops at the
+It checks four things: binary, credentials, model, server, and stops at the
 first gap with instructions rather than guessing. Re-run it any time; it is also
 the repair path. Your API key goes to opencode's own credential store; this
 plugin never reads it or asks you to paste it into the chat.
@@ -87,7 +87,7 @@ plugin never reads it or asks you to paste it into the chat.
 ```
 
 Reviews the working tree by default, or a branch diff with `--base`. Findings
-come back ordered critical → info. Nothing is fixed — this is review only.
+come back ordered critical → info. Nothing is fixed, this is review only.
 
 ### Argue with your change
 
@@ -109,7 +109,7 @@ somewhere specific. Use it when the code is correct but you are unsure it is
 /opencode:rescue --fresh
 ```
 
-Gives the task to opencode with write access — useful when Claude Code is stuck
+Gives the task to opencode with write access, useful when Claude Code is stuck
 in a loop, or when you want a different model to attempt the work. If you have a
 recent opencode thread it asks whether to continue it or start fresh; pass
 `--resume` or `--fresh` to skip the question. Output comes back verbatim.
@@ -186,7 +186,7 @@ output" rather than pretending to have reviewed something.
 ### How is this different from codex-plugin-cc?
 
 Same idea, different backend. codex-plugin-cc delegates to OpenAI's Codex; this
-delegates to opencode, which is provider-agnostic — so you pick the reviewing
+delegates to opencode, which is provider-agnostic, so you pick the reviewing
 model instead of being tied to one vendor. codex-plugin-cc came first and
 inspired this project.
 
@@ -210,7 +210,7 @@ your machine.
 ### Does it work on Linux or Windows?
 
 The test suite runs on Linux and macOS in CI. Day-to-day use has only been
-exercised on macOS — see [Known limits](#known-limits). Windows is untested.
+exercised on macOS, see [Known limits](#known-limits). Windows is untested.
 
 ### Is it the same as running opencode myself?
 
