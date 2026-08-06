@@ -5,9 +5,8 @@
 
 **A Claude Code plugin that delegates code review and coding tasks to
 [opencode](https://opencode.ai).** It adds slash commands like
-`/opencode:review` and `/opencode:rescue` so a second AI model, running in its
-own process, on a provider you choose, reviews your work or takes over a task,
-instead of the same model checking its own output.
+`/opencode:review` and `/opencode:rescue`, so a second model reviews your work
+or takes over a task instead of the same model checking its own output.
 
 If you have been looking for something like
 [codex-plugin-cc](https://github.com/openai/codex-plugin-cc) but for opencode
@@ -18,15 +17,14 @@ maintainers.
 
 ## Why use it
 
-Asking a model to review its own code is a weak check, it tends to agree with
-itself. This plugin gets you a genuinely independent opinion:
+A model asked to review its own code tends to agree with itself. This plugin
+sends the work somewhere else instead.
 
-- **A different model, a different vendor.** opencode runs whatever you point it
-  at Claude, GPT, Gemini, DeepSeek, Qwen, or a local model through Ollama.
-- **Real separation.** opencode runs as its own process with its own context. It
-  sees your diff, not your conversation.
-- **Non-blocking.** Send a job to the background and keep working; collect the
-  result when it lands.
+opencode runs as a separate process against whichever provider you configure, so
+the reviewer can be Claude, GPT, Gemini, DeepSeek, Qwen, or a model running
+locally under Ollama. It gets your diff and nothing else, so it is not reading
+the conversation that produced the code. Jobs can run in the background while
+you keep working.
 
 ## At a glance
 
@@ -56,7 +54,8 @@ itself. This plugin gets you a genuinely independent opinion:
 - [opencode](https://opencode.ai) 1.18.0 or newer, on your `PATH`
   ([anomalyco/opencode](https://github.com/anomalyco/opencode))
 - Node.js 22 or newer
-- Credentials for at least one model provider, `/opencode:setup` walks you through it
+- Credentials for at least one model provider. `/opencode:setup` walks you
+  through it.
 
 ## Install
 
@@ -71,10 +70,10 @@ Then run setup once and follow what it asks for:
 /opencode:setup
 ```
 
-It checks four things: binary, credentials, model, server, and stops at the
-first gap with instructions rather than guessing. Re-run it any time; it is also
-the repair path. Your API key goes to opencode's own credential store; this
-plugin never reads it or asks you to paste it into the chat.
+It checks the binary, your credentials, the model, and the server, then stops
+at the first gap it finds and tells you how to close it. Re-run it any time; it
+is also the repair path. Your API key goes to opencode's own credential store;
+this plugin never reads it or asks you to paste it into the chat.
 
 ## Commands
 
@@ -87,7 +86,8 @@ plugin never reads it or asks you to paste it into the chat.
 ```
 
 Reviews the working tree by default, or a branch diff with `--base`. Findings
-come back ordered critical → info. Nothing is fixed, this is review only.
+come back ordered from critical down to info. Nothing is fixed; this is review
+only.
 
 ### Argue with your change
 
@@ -96,10 +96,10 @@ come back ordered critical → info. Nothing is fixed, this is review only.
 /opencode:adversarial-review the caching layer
 ```
 
-Instead of proofreading, this attacks the thinking: wrong abstraction, unstated
-assumption, a simpler design you passed over. Add a focus phrase to point it
-somewhere specific. Use it when the code is correct but you are unsure it is
-*right*.
+Instead of proofreading, this argues with the thinking behind the change: a
+wrong abstraction, an assumption you never stated, a simpler design you passed
+over. Add a focus phrase to point it somewhere specific. Use it when the code is
+correct but you are unsure it is *right*.
 
 ### Hand off a task
 
@@ -109,10 +109,10 @@ somewhere specific. Use it when the code is correct but you are unsure it is
 /opencode:rescue --fresh
 ```
 
-Gives the task to opencode with write access, useful when Claude Code is stuck
-in a loop, or when you want a different model to attempt the work. If you have a
-recent opencode thread it asks whether to continue it or start fresh; pass
-`--resume` or `--fresh` to skip the question. Output comes back verbatim.
+Gives the task to opencode with write access. This is useful when Claude Code is
+stuck in a loop, or when you want a different model to attempt the work. If you
+have a recent opencode thread it asks whether to continue it or start fresh;
+pass `--resume` or `--fresh` to skip the question. Output comes back verbatim.
 
 ### Move the conversation over
 
@@ -178,17 +178,17 @@ with the opencode CLI rather than duplicated here. Any provider opencode
 supports works, including local models via Ollama.
 
 Weak free models are the most common cause of disappointing reviews. They often
-return nothing at all, which the plugin reports plainly as "the model returned no
-output" rather than pretending to have reviewed something.
+return nothing at all, which the plugin reports as "the model returned no
+output" instead of treating it as a failed review.
 
 ## FAQ
 
 ### How is this different from codex-plugin-cc?
 
-Same idea, different backend. codex-plugin-cc delegates to OpenAI's Codex; this
-delegates to opencode, which is provider-agnostic, so you pick the reviewing
-model instead of being tied to one vendor. codex-plugin-cc came first and
-inspired this project.
+Same idea, different backend. codex-plugin-cc delegates to OpenAI's Codex, and
+this delegates to opencode, which is provider-agnostic, so you pick the
+reviewing model instead of being tied to one vendor. codex-plugin-cc came first
+and inspired this project.
 
 ### Do I need a paid API key?
 
@@ -199,7 +199,7 @@ weaker at structured review, though.
 ### Does it send my whole conversation anywhere?
 
 Only `/opencode:transfer` does, and it says so before it runs. `review`,
-`adversarial-review`, and `rescue` send the diff or the task text — not your
+`adversarial-review`, and `rescue` send the diff or the task text, not your
 Claude Code transcript.
 
 ### Can I use it with a local model?
@@ -210,7 +210,7 @@ your machine.
 ### Does it work on Linux or Windows?
 
 The test suite runs on Linux and macOS in CI. Day-to-day use has only been
-exercised on macOS, see [Known limits](#known-limits). Windows is untested.
+exercised on macOS. See [Known limits](#known-limits). Windows is untested.
 
 ### Is it the same as running opencode myself?
 
@@ -240,4 +240,4 @@ default model does not call tools reliably.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
