@@ -229,8 +229,8 @@ export function validateReview(obj, contract = CONTRACT) {
   return { ok: true, findings }
 }
 
-function failedParse(raw, error) {
-  return { ok: false, findings: [], summary: null, raw, error }
+function failedParse(raw, error, empty = false) {
+  return { ok: false, findings: [], summary: null, raw, error, empty }
 }
 
 export function parseReviewOutput(text) {
@@ -240,6 +240,8 @@ export function parseReviewOutput(text) {
   } catch (error) {
     return failedParse('', `could not read model output: ${error.message}`)
   }
+
+  if (!raw.trim()) return failedParse(raw, 'the model returned no output', true)
 
   try {
     const json = extractJson(raw)
@@ -260,6 +262,7 @@ export function parseReviewOutput(text) {
       summary: parsed.summary ?? null,
       raw,
       error: null,
+      empty: false,
     }
   } catch (error) {
     return failedParse(raw, `review output could not be validated: ${error.message}`)

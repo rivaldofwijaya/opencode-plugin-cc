@@ -67,6 +67,11 @@ export function renderReview(parsed, { scope, base, truncated, jobId }) {
   lines.push('')
 
   if (!parsed?.ok) {
+    if (parsed.empty) {
+      lines.push('The model returned no output, so nothing was reviewed.')
+      lines.push('This is usually a transient model failure. Run the review again, or try another model.')
+      return lines.join('\n')
+    }
     lines.push(`The model's output could not be parsed as review JSON (${parsed?.error ?? 'unknown parse error'}).`)
     lines.push('Raw output follows verbatim:')
     lines.push('')

@@ -214,6 +214,29 @@ test('parseReviewOutput never throws and keeps the raw text', () => {
   assert.deepEqual(r.findings, [])
 })
 
+test('parseReviewOutput reports an empty model response as empty, not as a parse failure', () => {
+  const r = parseReviewOutput('')
+  assert.equal(r.ok, false)
+  assert.equal(r.empty, true)
+  assert.match(r.error, /returned no output/i)
+  assert.doesNotMatch(r.error, /JSON/)
+  assert.deepEqual(r.findings, [])
+})
+
+test('parseReviewOutput treats a whitespace-only model response as empty', () => {
+  const r = parseReviewOutput('  \n\t\r\n ')
+  assert.equal(r.ok, false)
+  assert.equal(r.empty, true)
+  assert.match(r.error, /returned no output/i)
+})
+
+test('parseReviewOutput does not call unparseable non-empty output empty', () => {
+  const r = parseReviewOutput('the model rambled and produced no json')
+  assert.equal(r.ok, false)
+  assert.equal(r.empty, false)
+  assert.match(r.error, /no JSON object found/)
+})
+
 test('parseReviewOutput keeps raw text for valid JSON that fails the schema', () => {
   const r = parseReviewOutput('{"findings":[{"file":"a.js","severity":"nope","confidence":"high","body":"x"}]}')
   assert.equal(r.ok, false)

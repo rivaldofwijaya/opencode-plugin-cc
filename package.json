@@ -1,6 +1,15 @@
 {
   "name": "opencode-plugin-cc",
   "version": "0.1.0",
+  "description": "Delegate code review and coding tasks to the opencode CLI from Claude Code.",
+  "license": "MIT",
+  "author": "rivaldofwijaya",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rivaldofwijaya/opencode-plugin-cc.git"
+  },
+  "homepage": "https://github.com/rivaldofwijaya/opencode-plugin-cc#readme",
+  "bugs": "https://github.com/rivaldofwijaya/opencode-plugin-cc/issues",
   "private": true,
   "type": "module",
   "engines": { "node": ">=22" },
