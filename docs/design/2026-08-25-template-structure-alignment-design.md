@@ -56,10 +56,10 @@ so cannot match a replacement anchored on `scripts/`.
 
 Three reference shapes need rewriting:
 
-- Relative imports `../scripts/` and `../../scripts/` in 33 files under
+- Relative imports `../scripts/` and `../../scripts/` in 35 files under
   `tests/`, including `tests/helpers/` and `tests/live/`.
 - `${CLAUDE_PLUGIN_ROOT}/scripts/` in `hooks/hooks.json` (3 occurrences),
-  in seven files under `commands/` (24 occurrences), and in
+  in eight files under `commands/` (22 occurrences), and in
   `skills/opencode-server-runtime/SKILL.md` (1 occurrence).
 - Nothing in `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`,
   or `package.json`, none of which mention the directory.
@@ -125,7 +125,8 @@ file under `src/` beyond its new location.
 - `npm test` is the gate. It runs the unit suite, the integration suite,
   and the command lint, and is the same suite CI runs on Linux and macOS.
 - `grep -rn 'scripts/' --exclude-dir=.git --exclude-dir=.superpowers .`
-  must return nothing once the rename is complete.
+  must return nothing outside `docs/`, whose prose names the old path, once the
+  rename is complete.
 - `node -e` import smoke of `src/opencode-companion.mjs` confirms the entry
   point resolves at its new path.
 - `npm run test:isolated` needs a real opencode binary on PATH. It runs if
