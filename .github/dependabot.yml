@@ -1,0 +1,11 @@
+# The project has zero npm dependencies, and dev/tests/unit/manifests.test.mjs
+# asserts it, so the only ecosystem worth watching is the actions the
+# workflows pin.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
