@@ -1,0 +1,19 @@
+name: Dependency review
+
+# The project has no dependencies today, so this finds nothing. It is here
+# to fail loudly on the pull request that first introduces one.
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    name: Review dependency changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: moderate
