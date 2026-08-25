@@ -7,7 +7,7 @@ import {
   newJobId, createJob, readJob, updateJob, listJobs, appendEvent, readEvents,
   writeResult, readResult, registerSession, knownSessions, unregisterSession,
   rememberOpencodeSession, lastOpencodeSession, pruneStale,
-} from '../../scripts/lib/tracked-jobs.mjs'
+} from '../../src/lib/tracked-jobs.mjs'
 
 const sandbox = async () => ({
   XDG_STATE_HOME: await mkdtemp(join(tmpdir(), 'ocjobs-')),

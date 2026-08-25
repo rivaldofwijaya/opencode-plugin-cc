@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, readFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { authFilePath, readAuth, listProviders, envProviderHints, setKey } from '../../scripts/lib/credentials.mjs'
+import { authFilePath, readAuth, listProviders, envProviderHints, setKey } from '../../src/lib/credentials.mjs'
 
 async function home() {
   const d = await mkdtemp(join(tmpdir(), 'ocauth-'))

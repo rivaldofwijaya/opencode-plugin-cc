@@ -14,8 +14,8 @@ import {
   appendJsonl,
   readJsonl,
   ensureDir,
-} from '../../scripts/lib/state.mjs'
-import { hookLogPayload, logHookFailure } from '../../scripts/lib/hook-io.mjs'
+} from '../../src/lib/state.mjs'
+import { hookLogPayload, logHookFailure } from '../../src/lib/hook-io.mjs'
 
 test('stateRoot honours XDG_STATE_HOME then falls back to ~/.local/state', () => {
   assert.equal(stateRoot({ XDG_STATE_HOME: '/x' }), '/x/opencode-plugin-cc')

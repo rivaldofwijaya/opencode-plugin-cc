@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.mjs\" SessionStart",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/session-lifecycle-hook.mjs\" SessionStart",
             "timeout": 1.5
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.mjs\" SessionEnd",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/session-lifecycle-hook.mjs\" SessionEnd",
             "timeout": 1.5
           }
         ]
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.mjs\"",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/stop-review-gate-hook.mjs\"",
             "timeout": 120
           }
         ]

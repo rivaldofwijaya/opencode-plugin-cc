@@ -6,12 +6,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   reapOrphans,
-} from '../../scripts/lib/broker-lifecycle.mjs'
+} from '../../src/lib/broker-lifecycle.mjs'
 import {
   writeEndpoint,
-} from '../../scripts/lib/broker-endpoint.mjs'
-import { isAlive, spawnDetached, terminate } from '../../scripts/lib/process.mjs'
-import { brokerDir, writeJson } from '../../scripts/lib/state.mjs'
+} from '../../src/lib/broker-endpoint.mjs'
+import { isAlive, spawnDetached, terminate } from '../../src/lib/process.mjs'
+import { brokerDir, writeJson } from '../../src/lib/state.mjs'
 
 test('broker ps identity parsing is stable under caller locale and timezone', async (t) => {
   const stateHome = await mkdtemp(join(tmpdir(), 'ocbroker-identity-'))

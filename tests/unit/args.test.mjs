@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseArgs } from '../../scripts/lib/args.mjs'
+import { parseArgs } from '../../src/lib/args.mjs'
 
 test('parses the verb and leaves flags empty', () => {
   assert.deepEqual(parseArgs(['doctor']), { verb: 'doctor', flags: {}, positional: [] })

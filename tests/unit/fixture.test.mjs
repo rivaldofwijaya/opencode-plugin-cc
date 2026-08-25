@@ -5,7 +5,7 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { run, terminate, isAlive } from '../../scripts/lib/process.mjs'
+import { run, terminate, isAlive } from '../../src/lib/process.mjs'
 import { spawnTracked } from '../helpers/process-cleanup.mjs'
 
 const bin = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))

@@ -4,13 +4,13 @@ import { mkdtemp, mkdir, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { run } from '../../scripts/lib/process.mjs'
-import { readEndpoint } from '../../scripts/lib/broker-endpoint.mjs'
-import { readJson, sessionsDir } from '../../scripts/lib/state.mjs'
-import { rememberOpencodeSession } from '../../scripts/lib/tracked-jobs.mjs'
-import { ccSessionId, handlers } from '../../scripts/opencode-companion.mjs'
+import { run } from '../../src/lib/process.mjs'
+import { readEndpoint } from '../../src/lib/broker-endpoint.mjs'
+import { readJson, sessionsDir } from '../../src/lib/state.mjs'
+import { rememberOpencodeSession } from '../../src/lib/tracked-jobs.mjs'
+import { ccSessionId, handlers } from '../../src/opencode-companion.mjs'
 
-const companion = fileURLToPath(new URL('../../scripts/opencode-companion.mjs', import.meta.url))
+const companion = fileURLToPath(new URL('../../src/opencode-companion.mjs', import.meta.url))
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
 
 async function persistedSession(s) {

@@ -5,9 +5,9 @@ import { createServer } from 'node:http'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { run } from '../../scripts/lib/process.mjs'
+import { run } from '../../src/lib/process.mjs'
 
-const companion = fileURLToPath(new URL('../../scripts/opencode-companion.mjs', import.meta.url))
+const companion = fileURLToPath(new URL('../../src/opencode-companion.mjs', import.meta.url))
 const realBin = process.env.OPENCODE_BIN || join(homedir(), '.opencode', 'bin', 'opencode')
 
 const haveRealBinary = await access(realBin).then(() => true, () => false)

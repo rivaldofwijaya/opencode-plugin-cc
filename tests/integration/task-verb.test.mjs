@@ -4,14 +4,14 @@ import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { isAlive, run } from '../../scripts/lib/process.mjs'
-import { cancelJob } from '../../scripts/lib/job-control.mjs'
-import { listJobs, readJob, readResult } from '../../scripts/lib/tracked-jobs.mjs'
-import { readJson } from '../../scripts/lib/state.mjs'
-import { refsPath } from '../../scripts/lib/broker-endpoint.mjs'
+import { isAlive, run } from '../../src/lib/process.mjs'
+import { cancelJob } from '../../src/lib/job-control.mjs'
+import { listJobs, readJob, readResult } from '../../src/lib/tracked-jobs.mjs'
+import { readJson } from '../../src/lib/state.mjs'
+import { refsPath } from '../../src/lib/broker-endpoint.mjs'
 import { trackJobs } from '../helpers/process-cleanup.mjs'
 
-const companion = fileURLToPath(new URL('../../scripts/opencode-companion.mjs', import.meta.url))
+const companion = fileURLToPath(new URL('../../src/opencode-companion.mjs', import.meta.url))
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
 const bindFailure = (detail) => /EACCES|EPERM|EADDRNOTAVAIL|loopback|listen/i.test(String(detail))
 

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { loadPrompt, listPrompts } from '../../scripts/lib/prompts.mjs'
+import { loadPrompt, listPrompts } from '../../src/lib/prompts.mjs'
 
 test('all three prompt templates ship', async () => {
   const names = await listPrompts()

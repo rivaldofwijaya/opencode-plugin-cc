@@ -11,7 +11,7 @@ References are tracked for Claude Code sessions and job workers. The broker is
 shut down when the last live reference releases it.
 
 When the broker will not start, a port is stuck, or state is inconsistent, run
-`node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" repair`. Repair
+`node "${CLAUDE_PLUGIN_ROOT}/src/opencode-companion.mjs" repair`. Repair
 reaps an orphaned broker endpoint and its stale ownership/reference state, marks
 running jobs whose execution owners are gone as stale, and removes expired
 terminal job records. It does not clear a live broker just because repair was

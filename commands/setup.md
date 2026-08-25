@@ -7,25 +7,25 @@ allowed-tools: Bash, AskUserQuestion
 Arguments: $ARGUMENTS
 
 If the user passed `--gate on|off`, run
-`node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" gate --on` or
-`node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" gate --off`, print
+`node "${CLAUDE_PLUGIN_ROOT}/src/opencode-companion.mjs" gate --on` or
+`node "${CLAUDE_PLUGIN_ROOT}/src/opencode-companion.mjs" gate --off`, print
 stdout verbatim, and stop. If they passed `--status`, run
-`node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" doctor`, print
+`node "${CLAUDE_PLUGIN_ROOT}/src/opencode-companion.mjs" doctor`, print
 stdout verbatim, and stop. If they passed `--repair`, run
-`node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" repair`, print
+`node "${CLAUDE_PLUGIN_ROOT}/src/opencode-companion.mjs" repair`, print
 stdout verbatim, and stop.
 
 The underlying gate status form is also available when needed:
-`node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" gate --status` prints
+`node "${CLAUDE_PLUGIN_ROOT}/src/opencode-companion.mjs" gate --status` prints
 the bare value `on` or `off`, with no sentence around it.
 
 Otherwise run the full onboarding:
 
 **1. Diagnose.** Run:
-`node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" doctor --json`
+`node "${CLAUDE_PLUGIN_ROOT}/src/opencode-companion.mjs" doctor --json`
 
 Read the JSON report. If `ok` is true, run
-`node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" doctor`, print that
+`node "${CLAUDE_PLUGIN_ROOT}/src/opencode-companion.mjs" doctor`, print that
 stdout verbatim, and stop — everything is already configured.
 
 **2. Binary gap.** If `binary.ok` is false, tell the user how to install opencode
@@ -42,18 +42,18 @@ live in `${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json`, and give the
 user this exact command to run themselves with a `!` prefix so the output lands
 in the conversation:
 
-`!node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" set-key --provider <provider> --key <API_KEY>`
+`!node "${CLAUDE_PLUGIN_ROOT}/src/opencode-companion.mjs" set-key --provider <provider> --key <API_KEY>`
 
 Never ask the user to paste the key to you, never read `auth.json`, and never
 echo a key. For OAuth or device-code providers, tell them to run
 `opencode auth login` interactively instead.
 
 **4. Model gap.** If `model.ok` is false, run
-`node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" models --provider <provider>` and ask with
+`node "${CLAUDE_PLUGIN_ROOT}/src/opencode-companion.mjs" models --provider <provider>` and ask with
 `AskUserQuestion` which model to use, populating the options from that real list.
 Then run:
 
-`node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" set-model --model <provider/model> --scope global`
+`node "${CLAUDE_PLUGIN_ROOT}/src/opencode-companion.mjs" set-model --model <provider/model> --scope global`
 
 Use `--scope project` instead only if the user asked for a repo-local setting.
 

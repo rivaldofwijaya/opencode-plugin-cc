@@ -4,14 +4,14 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, stat, chmod, rm } from 'n
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { isAlive, run, terminate } from '../../scripts/lib/process.mjs'
-import { readEndpoint, writeEndpoint } from '../../scripts/lib/broker-endpoint.mjs'
-import { brokerDir, readJson, writeJson } from '../../scripts/lib/state.mjs'
-import { ensureBroker } from '../../scripts/lib/broker-lifecycle.mjs'
+import { isAlive, run, terminate } from '../../src/lib/process.mjs'
+import { readEndpoint, writeEndpoint } from '../../src/lib/broker-endpoint.mjs'
+import { brokerDir, readJson, writeJson } from '../../src/lib/state.mjs'
+import { ensureBroker } from '../../src/lib/broker-lifecycle.mjs'
 import { withFakeOwnedBroker } from '../helpers/process-cleanup.mjs'
-import { handlers } from '../../scripts/opencode-companion.mjs'
+import { handlers } from '../../src/opencode-companion.mjs'
 
-const companion = fileURLToPath(new URL('../../scripts/opencode-companion.mjs', import.meta.url))
+const companion = fileURLToPath(new URL('../../src/opencode-companion.mjs', import.meta.url))
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
 const sandboxes = new Set()
 

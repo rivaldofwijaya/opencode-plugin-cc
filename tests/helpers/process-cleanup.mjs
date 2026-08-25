@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto'
 import { chmod, mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { isAlive, run, spawnDetached, terminate } from '../../scripts/lib/process.mjs'
-import { brokerDir, writeJson } from '../../scripts/lib/state.mjs'
-import { shutdownBroker } from '../../scripts/lib/broker-lifecycle.mjs'
-import { writeEndpoint } from '../../scripts/lib/broker-endpoint.mjs'
-import { cancelJob } from '../../scripts/lib/job-control.mjs'
-import { listJobs } from '../../scripts/lib/tracked-jobs.mjs'
+import { isAlive, run, spawnDetached, terminate } from '../../src/lib/process.mjs'
+import { brokerDir, writeJson } from '../../src/lib/state.mjs'
+import { shutdownBroker } from '../../src/lib/broker-lifecycle.mjs'
+import { writeEndpoint } from '../../src/lib/broker-endpoint.mjs'
+import { cancelJob } from '../../src/lib/job-control.mjs'
+import { listJobs } from '../../src/lib/tracked-jobs.mjs'
 
 export function trackChild(t, child) {
   t.after(async () => {

@@ -13,8 +13,8 @@ import {
   transcriptCandidatePath,
   handoffPath,
   persistedSessionPath,
-} from '../../scripts/lib/claude-session-transfer.mjs'
-import { buildTransferPrompt, ccSessionId } from '../../scripts/opencode-companion.mjs'
+} from '../../src/lib/claude-session-transfer.mjs'
+import { buildTransferPrompt, ccSessionId } from '../../src/opencode-companion.mjs'
 
 test('transcriptPath prefers CLAUDE_TRANSCRIPT_PATH when it exists', async () => {
   const d = await mkdtemp(join(tmpdir(), 'octr-'))

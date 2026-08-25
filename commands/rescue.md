@@ -13,7 +13,7 @@ Arguments: $ARGUMENTS
 
 If the user passed `--resume` or `--fresh`, obey it and skip this step.
 
-Otherwise run: `node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task-resume-candidate --json`
+Otherwise run: `node "${CLAUDE_PLUGIN_ROOT}/src/opencode-companion.mjs" task-resume-candidate --json`
 
 If `hasCandidate` is `true`, ask once with `AskUserQuestion` whether to continue
 that opencode thread or start a new one. Order the options by how the task text
@@ -25,7 +25,7 @@ going", "dig deeper", "also"), and *fresh* first when it reads as a new task.
 Use the `Agent` tool with `subagent_type: "opencode-rescue"`. Give it exactly one
 instruction: run
 
-`node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" task --wait [--resume|--fresh] [--model <m>] [--variant <v>] -- <task text>`
+`node "${CLAUDE_PLUGIN_ROOT}/src/opencode-companion.mjs" task --wait [--resume|--fresh] [--model <m>] [--variant <v>] -- <task text>`
 
 and return stdout unchanged. Use `--background` instead of `--wait` only if the
 user asked for it. Default is foreground. Include `--resume` or `--fresh` only

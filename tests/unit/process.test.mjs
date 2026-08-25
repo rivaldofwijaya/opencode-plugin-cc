@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { run, terminate, isAlive } from '../../scripts/lib/process.mjs'
+import { run, terminate, isAlive } from '../../src/lib/process.mjs'
 import { spawnTracked } from '../helpers/process-cleanup.mjs'
 
 test('run captures stdout and a zero exit', async () => {

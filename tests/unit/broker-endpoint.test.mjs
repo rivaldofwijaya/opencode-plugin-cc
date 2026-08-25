@@ -13,7 +13,7 @@ import {
   baseUrlFor,
   acquireLock,
   releaseLock,
-} from '../../scripts/lib/broker-endpoint.mjs'
+} from '../../src/lib/broker-endpoint.mjs'
 
 const sandbox = async () => ({
   XDG_STATE_HOME: await mkdtemp(join(tmpdir(), 'ocbroker-')),

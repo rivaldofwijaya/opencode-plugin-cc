@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { run } from '../../scripts/lib/process.mjs'
+import { run } from '../../src/lib/process.mjs'
 import { companion, live, model, liveEnv, repo } from './helpers.mjs'
 
 test('live: a real review returns findings or a clean report', { skip: !live && 'set OPENCODE_LIVE=1 to run' }, async () => {

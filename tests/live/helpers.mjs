@@ -3,11 +3,11 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { cancelJob } from '../../scripts/lib/job-control.mjs'
-import { run } from '../../scripts/lib/process.mjs'
-import { listJobs } from '../../scripts/lib/tracked-jobs.mjs'
+import { cancelJob } from '../../src/lib/job-control.mjs'
+import { run } from '../../src/lib/process.mjs'
+import { listJobs } from '../../src/lib/tracked-jobs.mjs'
 
-export const companion = fileURLToPath(new URL('../../scripts/opencode-companion.mjs', import.meta.url))
+export const companion = fileURLToPath(new URL('../../src/opencode-companion.mjs', import.meta.url))
 export const live = process.env.OPENCODE_LIVE === '1'
 export const model = process.env.OPENCODE_LIVE_MODEL || 'openrouter/openai/gpt-oss-20b:free'
 // Only the tool-counter test uses this; the free default may not call tools.

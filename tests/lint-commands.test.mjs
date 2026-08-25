@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readdir, readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import { VERBS } from '../scripts/opencode-companion.mjs'
+import { VERBS } from '../src/opencode-companion.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 
@@ -42,7 +42,7 @@ test('every companion verb named in a command or agent actually exists', async (
 })
 
 test('quoted companion verb extraction catches drift', () => {
-  const driftedCommand = 'Run node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" review-with-typo'
+  const driftedCommand = 'Run node "${CLAUDE_PLUGIN_ROOT}/src/opencode-companion.mjs" review-with-typo'
   const verbs = extractCompanionVerbs(driftedCommand)
   assert.deepEqual(verbs, ['review-with-typo'])
   assert.throws(

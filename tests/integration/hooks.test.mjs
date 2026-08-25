@@ -5,16 +5,16 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
-import { isAlive, run, terminate } from '../../scripts/lib/process.mjs'
-import { createJob, listJobs, readJob, updateJob } from '../../scripts/lib/tracked-jobs.mjs'
-import { jobDir, readJson, writeJson } from '../../scripts/lib/state.mjs'
-import { refsPath, readEndpoint } from '../../scripts/lib/broker-endpoint.mjs'
-import { prepareReview } from '../../scripts/lib/review-job.mjs'
+import { isAlive, run, terminate } from '../../src/lib/process.mjs'
+import { createJob, listJobs, readJob, updateJob } from '../../src/lib/tracked-jobs.mjs'
+import { jobDir, readJson, writeJson } from '../../src/lib/state.mjs'
+import { refsPath, readEndpoint } from '../../src/lib/broker-endpoint.mjs'
+import { prepareReview } from '../../src/lib/review-job.mjs'
 import { spawnTracked, withFakeOwnedBroker } from '../helpers/process-cleanup.mjs'
 
-const lifecycle = fileURLToPath(new URL('../../scripts/session-lifecycle-hook.mjs', import.meta.url))
-const gate = fileURLToPath(new URL('../../scripts/stop-review-gate-hook.mjs', import.meta.url))
-const companion = fileURLToPath(new URL('../../scripts/opencode-companion.mjs', import.meta.url))
+const lifecycle = fileURLToPath(new URL('../../src/session-lifecycle-hook.mjs', import.meta.url))
+const gate = fileURLToPath(new URL('../../src/stop-review-gate-hook.mjs', import.meta.url))
+const companion = fileURLToPath(new URL('../../src/opencode-companion.mjs', import.meta.url))
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
 const bindFailure = (detail) => /EACCES|EPERM|EADDRNOTAVAIL|loopback|listen/i.test(String(detail))
 
