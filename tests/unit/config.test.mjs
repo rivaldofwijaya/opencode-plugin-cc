@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { CONFIG_SCHEMA_URL, resolveDefaultModel, configTargetPath, setModel } from '../../scripts/lib/config.mjs'
+import { CONFIG_SCHEMA_URL, resolveDefaultModel, configTargetPath, setModel } from '../../src/lib/config.mjs'
 
 async function sandbox() {
   const d = await mkdtemp(join(tmpdir(), 'occfg-'))

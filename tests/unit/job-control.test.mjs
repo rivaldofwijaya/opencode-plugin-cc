@@ -6,7 +6,7 @@ import {
   classifySessionError,
   createEventAccumulator,
   streamIdleTimeoutMs,
-} from '../../scripts/lib/job-control.mjs'
+} from '../../src/lib/job-control.mjs'
 
 const capturePath = fileURLToPath(new URL(
   '../captures/opencode-1.18.13-task-stream.jsonl',

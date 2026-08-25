@@ -3,8 +3,8 @@ import assert from 'node:assert/strict'
 import { chmod, mkdtemp, realpath, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { run } from '../../scripts/lib/process.mjs'
-import { repoRoot, defaultBase, resolveScope, sizeChange, collectDiff } from '../../scripts/lib/git.mjs'
+import { run } from '../../src/lib/process.mjs'
+import { repoRoot, defaultBase, resolveScope, sizeChange, collectDiff } from '../../src/lib/git.mjs'
 
 const gitEnv = {
   ...process.env,

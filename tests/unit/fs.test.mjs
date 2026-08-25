@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, writeFile, stat, chmod, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { atomicWrite, backupFile, readJsonc, mergeWriteJson, stripJsonComments } from '../../scripts/lib/fs.mjs'
+import { atomicWrite, backupFile, readJsonc, mergeWriteJson, stripJsonComments } from '../../src/lib/fs.mjs'
 
 const tmp = () => mkdtemp(join(tmpdir(), 'ocfs-'))
 

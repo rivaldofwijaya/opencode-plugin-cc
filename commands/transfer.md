@@ -10,7 +10,7 @@ session.
 
 Run:
 
-`node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" transfer`
+`node "${CLAUDE_PLUGIN_ROOT}/src/opencode-companion.mjs" transfer`
 
 Print the companion's stdout verbatim. If it exits with code `1`, treat that as a
 reported gap and surface any stderr unchanged; code `2` is an invalid invocation

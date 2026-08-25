@@ -4,14 +4,14 @@ import { chmod, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { run } from '../../scripts/lib/process.mjs'
-import { cancelJob } from '../../scripts/lib/job-control.mjs'
-import { createJob, listJobs, readJob, writeResult } from '../../scripts/lib/tracked-jobs.mjs'
-import { jobDir } from '../../scripts/lib/state.mjs'
-import { finishReview, prepareReview } from '../../scripts/lib/review-job.mjs'
-import { reviewExitCode } from '../../scripts/opencode-companion.mjs'
+import { run } from '../../src/lib/process.mjs'
+import { cancelJob } from '../../src/lib/job-control.mjs'
+import { createJob, listJobs, readJob, writeResult } from '../../src/lib/tracked-jobs.mjs'
+import { jobDir } from '../../src/lib/state.mjs'
+import { finishReview, prepareReview } from '../../src/lib/review-job.mjs'
+import { reviewExitCode } from '../../src/opencode-companion.mjs'
 
-const companion = fileURLToPath(new URL('../../scripts/opencode-companion.mjs', import.meta.url))
+const companion = fileURLToPath(new URL('../../src/opencode-companion.mjs', import.meta.url))
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
 const bindFailure = (detail) => /EACCES|EPERM|EADDRNOTAVAIL|loopback|listen/i.test(String(detail))
 const literal = (value) => new RegExp(String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))

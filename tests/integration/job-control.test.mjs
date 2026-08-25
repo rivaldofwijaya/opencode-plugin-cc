@@ -4,8 +4,8 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { run, isAlive, terminate } from '../../scripts/lib/process.mjs'
-import { startJob, runForeground, cancelJob } from '../../scripts/lib/job-control.mjs'
+import { run, isAlive, terminate } from '../../src/lib/process.mjs'
+import { startJob, runForeground, cancelJob } from '../../src/lib/job-control.mjs'
 import {
   createJob,
   listJobs,
@@ -17,7 +17,7 @@ import {
   updateJobMeta,
   writeResult,
   jobLockPath,
-} from '../../scripts/lib/tracked-jobs.mjs'
+} from '../../src/lib/tracked-jobs.mjs'
 import {
   acquireLock,
   acquireLockAt,
@@ -25,8 +25,8 @@ import {
   refsPath,
   releaseLock,
   releaseLockAt,
-} from '../../scripts/lib/broker-endpoint.mjs'
-import { jobDir, readJson } from '../../scripts/lib/state.mjs'
+} from '../../src/lib/broker-endpoint.mjs'
+import { jobDir, readJson } from '../../src/lib/state.mjs'
 import { spawnTracked } from '../helpers/process-cleanup.mjs'
 
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
@@ -445,7 +445,7 @@ test('worker acquires its own ref before the launcher exits', async (t) => {
   const env = await sandbox({ FAKE_OPENCODE_EVENT_DELAY_MS: '500' })
   let jobId
   try {
-    const jobControlUrl = new URL('../../scripts/lib/job-control.mjs', import.meta.url).href
+    const jobControlUrl = new URL('../../src/lib/job-control.mjs', import.meta.url).href
     const launcher = `
       import { startJob } from ${JSON.stringify(jobControlUrl)}
       const started = await startJob({
@@ -498,7 +498,7 @@ test('a detached background worker completes after its launcher exits', async (t
   const startingRefs = await readJson(refsPath(env), {})
   let jobId
   try {
-    const jobControlUrl = new URL('../../scripts/lib/job-control.mjs', import.meta.url).href
+    const jobControlUrl = new URL('../../src/lib/job-control.mjs', import.meta.url).href
     const launcher = `
       import { startJob } from ${JSON.stringify(jobControlUrl)}
       const started = await startJob({
@@ -521,7 +521,7 @@ test('a detached background worker completes after its launcher exits', async (t
     assert.match(jobId, /^job_/)
 
     const reader = `
-      import { readJob, readEvents, readResult } from ${JSON.stringify(new URL('../../scripts/lib/tracked-jobs.mjs', import.meta.url).href)}
+      import { readJob, readEvents, readResult } from ${JSON.stringify(new URL('../../src/lib/tracked-jobs.mjs', import.meta.url).href)}
       const id = ${JSON.stringify(jobId)}
       const deadline = Date.now() + 15000
       let job

@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import {
   MIN_VERSION, compareVersions, meetsFloor, resolveBinary, clearBinaryCache,
   buildRunArgs, buildServeArgs
-} from '../../scripts/lib/opencode.mjs'
+} from '../../src/lib/opencode.mjs'
 
 async function fakeBin(dir, name = 'opencode') {
   const p = join(dir, name)

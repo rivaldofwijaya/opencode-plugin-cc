@@ -2,8 +2,8 @@ import { test, before, after, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
-import { spawnDetached, terminate } from '../../scripts/lib/process.mjs'
-import { OpencodeClient, parseSseChunk, HttpError } from '../../scripts/lib/server.mjs'
+import { spawnDetached, terminate } from '../../src/lib/process.mjs'
+import { OpencodeClient, parseSseChunk, HttpError } from '../../src/lib/server.mjs'
 
 const bin = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
 const loopbackAvailable = await new Promise((resolve) => {

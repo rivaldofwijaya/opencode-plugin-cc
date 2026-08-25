@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { renderReview, renderJobList, renderJobResult, renderDoctor, formatElapsed } from '../../scripts/lib/render.mjs'
+import { renderReview, renderJobList, renderJobResult, renderDoctor, formatElapsed } from '../../src/lib/render.mjs'
 
 test('formatElapsed formats seconds, minutes, and hours', () => {
   assert.equal(formatElapsed(4000), '4s')

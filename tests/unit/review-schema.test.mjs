@@ -7,12 +7,12 @@ import { join } from 'node:path'
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { extractJson, loadSchema, validateReview, parseReviewOutput } from '../../scripts/lib/review-schema.mjs'
-import { readJsonc } from '../../scripts/lib/fs.mjs'
+import { extractJson, loadSchema, validateReview, parseReviewOutput } from '../../src/lib/review-schema.mjs'
+import { readJsonc } from '../../src/lib/fs.mjs'
 
 const execFileAsync = promisify(execFile)
 const schemaPath = fileURLToPath(new URL('../../schemas/review-output.schema.json', import.meta.url))
-const reviewSchemaModuleUrl = new URL('../../scripts/lib/review-schema.mjs', import.meta.url)
+const reviewSchemaModuleUrl = new URL('../../src/lib/review-schema.mjs', import.meta.url)
 
 test('extractJson finds a bare object', () => {
   assert.equal(extractJson('{"a":1}'), '{"a":1}')

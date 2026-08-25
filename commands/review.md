@@ -11,7 +11,7 @@ Arguments: $ARGUMENTS
 
 **1. Size the change first.**
 
-Run: `node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" review-size --json` with any `--base` or `--scope` the user gave.
+Run: `node "${CLAUDE_PLUGIN_ROOT}/src/opencode-companion.mjs" review-size --json` with any `--base` or `--scope` the user gave.
 
 The JSON tells you `scope`, `empty`, `tiny`, `files`, and `untracked`. Untracked
 files and directories are reviewable work. Conclude there is nothing to review
@@ -32,7 +32,7 @@ Ask once with `AskUserQuestion`, with the recommended option first and labelled
 
 **3. Run it.**
 
-Run: `node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" review --wait` (or `--background`),
+Run: `node "${CLAUDE_PLUGIN_ROOT}/src/opencode-companion.mjs" review --wait` (or `--background`),
 passing through any `--base`, `--scope`, `--model`, and `--variant` the user gave.
 
 **4. Return the output verbatim.**

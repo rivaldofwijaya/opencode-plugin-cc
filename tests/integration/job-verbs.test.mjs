@@ -4,18 +4,18 @@ import { chmod, mkdtemp, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { run, isAlive, spawnDetached, terminate, TERMINATE_GRACE_MS } from '../../scripts/lib/process.mjs'
+import { run, isAlive, spawnDetached, terminate, TERMINATE_GRACE_MS } from '../../src/lib/process.mjs'
 import {
   createJob,
   readJob,
   updateJob,
   writeResult,
-} from '../../scripts/lib/tracked-jobs.mjs'
-import { jobDir, readJson, writeJson } from '../../scripts/lib/state.mjs'
-import { refsPath } from '../../scripts/lib/broker-endpoint.mjs'
+} from '../../src/lib/tracked-jobs.mjs'
+import { jobDir, readJson, writeJson } from '../../src/lib/state.mjs'
+import { refsPath } from '../../src/lib/broker-endpoint.mjs'
 import { spawnTracked } from '../helpers/process-cleanup.mjs'
 
-const companion = fileURLToPath(new URL('../../scripts/opencode-companion.mjs', import.meta.url))
+const companion = fileURLToPath(new URL('../../src/opencode-companion.mjs', import.meta.url))
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
 const WORKER_EXIT_WAIT_MARGIN_MS = 1000
 

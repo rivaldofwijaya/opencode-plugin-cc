@@ -13,16 +13,16 @@ import {
   reapOrphans,
   SESSION_HOLDER_MAX_AGE_MS,
   shutdownBroker,
-} from '../../scripts/lib/broker-lifecycle.mjs'
+} from '../../src/lib/broker-lifecycle.mjs'
 import {
   readEndpoint,
   writeEndpoint,
   lockPath,
   refsPath,
-} from '../../scripts/lib/broker-endpoint.mjs'
-import { isAlive, terminate } from '../../scripts/lib/process.mjs'
+} from '../../src/lib/broker-endpoint.mjs'
+import { isAlive, terminate } from '../../src/lib/process.mjs'
 import { spawnTracked, withFakeOwnedBroker } from '../helpers/process-cleanup.mjs'
-import { brokerDir, readJson, writeJson, sessionsDir } from '../../scripts/lib/state.mjs'
+import { brokerDir, readJson, writeJson, sessionsDir } from '../../src/lib/state.mjs'
 
 const fixture = fileURLToPath(new URL('../fixture-bin/opencode', import.meta.url))
 
