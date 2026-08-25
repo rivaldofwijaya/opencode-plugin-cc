@@ -14,8 +14,8 @@
   "type": "module",
   "engines": { "node": ">=22" },
   "scripts": {
-    "test": "node --test 'tests/unit/**/*.test.mjs' 'tests/integration/**/*.test.mjs' tests/lint-commands.test.mjs",
-    "test:isolated": "node --test 'tests/isolated/**/*.test.mjs'",
-    "test:live": "OPENCODE_LIVE=1 node --test --test-concurrency=1 'tests/live/**/*.test.mjs'"
+    "test": "node --test 'dev/tests/unit/**/*.test.mjs' 'dev/tests/integration/**/*.test.mjs' dev/tests/lint-commands.test.mjs",
+    "test:isolated": "node --test 'dev/tests/isolated/**/*.test.mjs'",
+    "test:live": "OPENCODE_LIVE=1 node --test --test-concurrency=1 'dev/tests/live/**/*.test.mjs'"
   }
 }
