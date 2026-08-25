@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: opencode CLI issues
+    url: https://github.com/anomalyco/opencode/issues
+    about: Problems with the opencode CLI itself, rather than this plugin.
