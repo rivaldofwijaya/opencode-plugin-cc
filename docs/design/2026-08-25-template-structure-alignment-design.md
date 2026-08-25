@@ -14,6 +14,21 @@ therefore means creating its directories and files here and filling them
 with whatever this project's equivalent content is, rather than copying
 anything across.
 
+## What the template's layout means
+
+The template separates the product from the machinery used to develop it.
+
+`src/` holds what we built: the code that ships to users. `dist/` holds
+what a build produces from it. `tests/` exercises it.
+
+`scripts/`, `tools/`, and `reports/` are development support. They hold
+helper scripts, local tooling, and generated output that belong to the
+work of building the project rather than to the project itself. `examples/`
+and `docs/` serve the reader.
+
+That split is what decides where this repository's existing code goes, and
+it is the reason `scripts/` here is not simply renamed out of existence.
+
 ## Constraints
 
 Claude Code resolves a plugin's `commands/`, `agents/`, `skills/`, and
@@ -36,28 +51,45 @@ asserts that. Anything added here must not introduce one.
     docs/design/        restored            hooks/            unchanged
     examples/           new, .gitkeep       prompts/          unchanged
     reports/            new, .gitkeep       schemas/          unchanged
-    src/                was scripts/        skills/           unchanged
-    tests/              unchanged           tools/            new, .gitkeep
+    scripts/            new, .gitkeep       skills/           unchanged
+    src/                was scripts/
+    tests/              unchanged
+    tools/              new, .gitkeep
 
 Git cannot track an empty directory, so each directory with no content yet
 gets a `.gitkeep`. These are `.claude/`, `dist/`, `examples/`, `reports/`,
-and `tools/`.
+`scripts/`, and `tools/`.
 
-## Renaming scripts/ to src/
+`dist/` stays empty because nothing is built. The plugin ships its source,
+and Claude Code runs the `.mjs` files under `src/` directly.
 
-The template calls the code directory `src/`; this repository calls it
-`scripts/`. The rename touches 132 references.
+## Moving the shipped code into src/
 
-It is mechanically safe. No file inside `scripts/` refers to that directory
-by name, because every internal import is relative (`./lib/state.mjs` and
-similar). The only bare word `scripts` anywhere else in the repository is
-the `"scripts":` key in `package.json`, which carries no trailing slash and
-so cannot match a replacement anchored on `scripts/`.
+Everything currently under `scripts/` is shipped product, so all of it
+moves to `src/`:
+
+- `opencode-companion.mjs`, `session-lifecycle-hook.mjs`, and
+  `stop-review-gate-hook.mjs` are invoked by name from `hooks/hooks.json`,
+  the files under `commands/`, and one skill.
+- `server-broker.mjs` is spawned at runtime by `lib/broker-lifecycle.mjs`.
+  That reference is a relative URL, so it survives the move untouched.
+- Everything under `lib/` is imported by the above.
+
+Nothing there is a development helper, so the `scripts/` the template asks
+for is created fresh and empty, ready for development helpers that do not
+exist yet. The same goes for `tools/` and `reports/`.
+
+The move touches 132 references. It is mechanically safe: no file inside
+`scripts/` refers to that directory by name, because every internal import
+is relative (`./lib/state.mjs` and similar). The only bare word `scripts`
+anywhere else in the repository is the `"scripts":` key in `package.json`,
+which carries no trailing slash and so cannot match a replacement anchored
+on `scripts/`.
 
 Three reference shapes need rewriting:
 
 - Relative imports `../scripts/` and `../../scripts/` in 35 files under
-  `tests/`, including `tests/helpers/` and `tests/live/`.
+  `tests/`, including `tests/helpers/` and `tests/live/` (106 occurrences).
 - `${CLAUDE_PLUGIN_ROOT}/scripts/` in `hooks/hooks.json` (3 occurrences),
   in eight files under `commands/` (22 occurrences), and in
   `skills/opencode-server-runtime/SKILL.md` (1 occurrence).
@@ -66,7 +98,9 @@ Three reference shapes need rewriting:
 
 The move is performed with `git mv scripts src` so history follows the
 files, and the reference rewrite lands in the same commit, because the
-repository does not work in any state between the two.
+repository does not work in any state between the two. The empty
+`scripts/.gitkeep` is created afterwards, so git sees a clean rename rather
+than a rename tangled with a new file at the old path.
 
 Two tests are load-bearing for this change and are expected to pass without
 being edited beyond their import paths. `tests/lint-commands.test.mjs`
@@ -118,15 +152,15 @@ with real content rather than left at zero bytes.
 The version is not bumped; this changes no behaviour. `.gitignore` is
 correct as it stands and is not touched. `.superpowers/` is gitignored
 working scratch and does not move. No behavioural change is made to any
-file under `src/` beyond its new location.
+moved file beyond its new location.
 
 ## Verification
 
 - `npm test` is the gate. It runs the unit suite, the integration suite,
   and the command lint, and is the same suite CI runs on Linux and macOS.
 - `grep -rn 'scripts/' --exclude-dir=.git --exclude-dir=.superpowers .`
-  must return nothing outside `docs/`, whose prose names the old path, once the
-  rename is complete.
+  must return nothing outside `docs/`, whose prose names the old path, once
+  the move is complete.
 - `node -e` import smoke of `src/opencode-companion.mjs` confirms the entry
   point resolves at its new path.
 - `npm run test:isolated` needs a real opencode binary on PATH. It runs if
