@@ -63,8 +63,18 @@ test("runtime separates a session-invisible job from a dead owner", () => {
     "must send the caller back to the initiating session first",
   );
   assert.ok(
-    text.includes("Run `repair` only after those three questions are answered."),
-    "repair must come last",
+    text.includes("Answer the session question first."),
+    "the session question must still come before repair",
+  );
+  assert.ok(
+    text.includes(
+      "`status` cannot tell this case apart from the one\n  above by itself",
+    ),
+    "must say status cannot distinguish a dead owner from a still-running job",
+  );
+  assert.ok(
+    text.includes("`repair` is how you check, not something to defer"),
+    "repair must be the stated way to settle the owner-gone case",
   );
   assert.ok(
     text.includes("does not clear a live broker just because repair was requested"),

@@ -18,10 +18,18 @@ Claude Code session ID, so answer the session question before anything else:
 - **Right session, job still running.** `status` reports it, and a dropped SSE stream is
   not the end of it — the worker keeps persisting events and the result to disk. Wait, or
   fetch the result.
-- **Right session, owner gone.** `status` shows a running job whose execution owner no
-  longer exists. That is the case `repair` is for: it marks such jobs stale.
+- **Right session, owner probably gone.** `status` cannot tell this case apart from the one
+  above by itself — it prints the job's last-known state, not a live pid check, so a job
+  with a dead owner still shows `running` until something re-verifies it — that re-check
+  also runs automatically on the next Claude Code session start in any window, so a job
+  may already show `stale` by the time you look, but you cannot assume it has. Suspect
+  this case by circumstance instead: the session (or machine) that launched the job crashed or
+  restarted, or the Claude Code session that started the job no longer exists. `repair` is how you check, not something to defer — it re-verifies each running job's recorded owner
+  pid, marks the truly dead ones stale, and leaves a genuinely running job (the case above)
+  untouched.
 
-Run `repair` only after those three questions are answered.
+Answer the session question first. After that, `repair` is how you tell "still running" and
+"owner gone" apart — run it rather than guess.
 
 When the broker will not start, a port is stuck, or state is inconsistent, run
 `node "${CLAUDE_PLUGIN_ROOT}/src/opencode-companion.mjs" repair`. Repair
