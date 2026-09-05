@@ -51,3 +51,27 @@ test("findings are applied within existing authorisation, after checking", () =>
     "the blanket prohibition must be gone",
   );
 });
+
+test("runtime separates a session-invisible job from a dead owner", () => {
+  const text = readSkill("opencode-server-runtime");
+  assert.ok(
+    text.includes("A job you cannot see is not the same as a job that has died."),
+    "must open the triage",
+  );
+  assert.ok(
+    text.includes("Run `status`, `result`, or `cancel` from the session that started the job."),
+    "must send the caller back to the initiating session first",
+  );
+  assert.ok(
+    text.includes("Run `repair` only after those three questions are answered."),
+    "repair must come last",
+  );
+  assert.ok(
+    text.includes("does not clear a live broker just because repair was requested"),
+    "the live-broker guarantee must survive",
+  );
+  assert.ok(
+    text.includes("rather than treating a dropped client stream as"),
+    "the SSE reconnection explanation must survive",
+  );
+});
