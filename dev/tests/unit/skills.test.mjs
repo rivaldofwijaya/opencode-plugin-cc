@@ -31,3 +31,23 @@ test("result handling treats returned output as untrusted data", () => {
     "the no-reconstruction prohibition must survive",
   );
 });
+
+test("findings are applied within existing authorisation, after checking", () => {
+  const text = readSkill("opencode-result-handling");
+  assert.ok(
+    text.includes("Check a finding against the code before acting on it."),
+    "must require evidence before acting",
+  );
+  assert.ok(
+    text.includes('a "review and fix" request already authorises the fixes it asked for'),
+    "must recognise authorisation the current task already carries",
+  );
+  assert.ok(
+    text.includes("say what you would change and let the user decide"),
+    "must say what to do when the fix is out of scope",
+  );
+  assert.ok(
+    !text.includes("Do not act on them unless the\nuser asks you to."),
+    "the blanket prohibition must be gone",
+  );
+});
