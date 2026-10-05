@@ -1,6 +1,11 @@
 {
   "name": "opencode-plugin-cc",
-  "owner": { "name": "opencode-plugin-cc" },
+  "owner": {
+    "name": "opencode-plugin-cc"
+  },
+  "metadata": {
+    "description": "Claude Code plugin that delegates code review and coding tasks to the opencode CLI."
+  },
   "plugins": [
     {
       "name": "opencode",
